@@ -16,7 +16,7 @@ Decentralized, volunteer-driven training for the [OpenMythos](https://github.com
                     │         │         │
          ┌──────────▼─┐   ┌──▼────────┐   ┌──▼────────┐
          │   Worker   │   │  Worker   │   │  Worker   │
-         │  (mac_1)   │   │ (mac_2)   │   │ (mac_3)   │
+         │  (mac_1)   │   │(Nvidia_2) │   │ (mac_3)   │
          │            │   │           │   │           │
          │  - Fetch   │   │  - Fetch  │   │  - Fetch  │
          │  - Train   │   │  - Train  │   │  - Train  │
@@ -46,16 +46,21 @@ openmythos-swarm/
 ├── common/              # Shared utilities
 │   ├── crypto.py        # Ed25519 signing, HMAC verification
 │   ├── manifest.py      # RoundSpec, WorkerSubmission, RoundResult
-│   └── __init__.py
+│   ├── __init__.py
 ├── master/              # Coordinator server
 │   ├── server.py        # MasterCoordinator class
+│   ├── scheduler.py     # ⭐ Auto-scheduler
 │   └── __init__.py
 ├── worker/              # Worker client
+│   ├── contrib.py       # ⭐ Auto-detecting worker
 │   ├── client.py        # WorkerClient class
-│   └── __init__.py
+│   ├── __init__.py
 ├── tests/               # Integration tests
 │   └── test_basic.py    # End-to-end round test
 ├── README.md            # This file
+├── WORKER_SETUP.md
+├── DEPLOYMENT.md
+├── GITHUB_SETUP.md
 └── requirements.txt     # Dependencies
 ```
 
