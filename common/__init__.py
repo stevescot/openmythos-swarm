@@ -1,6 +1,6 @@
 """OpenMythos Swarm: Federated training on Mac, NVIDIA, and AMD workers."""
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from .crypto import (
     Ed25519Key,

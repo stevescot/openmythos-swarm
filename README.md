@@ -111,6 +111,9 @@ The swarm auto-detects your device and uses the optimal backend:
    - `openmythos-master`
    - `openmythos-scheduler`
    - `openmythos-worker`
+   - `openmythos-register`
+   - `openmythos-eth-receipt`
+   - `openmythos-eth-anchor`
 
    > On Windows, these may install under `%APPDATA%\Python\Python313\Scripts`. Add that directory to `PATH` if commands are not found.
 
@@ -219,6 +222,33 @@ openmythos-master --state-dir ./master_state --list-workers
 
 Keys are stored in `~/.openmythos-swarm/keys/` and re-used across rounds.
 If an allowlist exists, submissions are accepted only when `worker_id` and public key match the registered record.
+
+### 3.6 zk-eth runbook (receipt export + anchor payload)
+
+On the `zk-eth` branch, you can export finalized round receipts and prepare Ethereum anchor payloads:
+
+```bash
+# 1) Finalize a round first (normal flow)
+openmythos-master --state-dir ./master_state --status
+
+# 2) Export anchor-ready receipts from finalized round N
+openmythos-master --state-dir ./master_state \
+   --export-round-receipts N \
+   --credits-per-step 2
+
+# 3) Prepare anchor calldata payload from one exported receipt
+openmythos-eth-anchor \
+   --receipt-file ./master_state/rounds/round_000N/receipts/<worker>_receipt.json \
+   --worker-address 0x0000000000000000000000000000000000000000 \
+   --credits 100
+```
+
+The exported receipt contains:
+- deterministic `receipt_payload`
+- `receipt_hash` (SHA256 canonical hash, hex)
+- suggested `credits`
+
+These values are the inputs for `anchorReceipt(...)` on `ZkPotContributionRegistry.sol`.
 
 ### 4. Run Integration Test
 

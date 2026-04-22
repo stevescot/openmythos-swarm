@@ -50,6 +50,11 @@ def receipt_hash_hex(payload: Dict[str, Any]) -> str:
     return "0x" + digest
 
 
+def receipt_hash_bytes32(payload: Dict[str, Any]) -> bytes:
+    """Receipt hash as raw bytes32 (for on-chain anchoring)."""
+    return hashlib.sha256(canonical_json(payload)).digest()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create deterministic ZKPoT receipt hash for ETH anchoring")
     parser.add_argument("--worker-id", required=True)
