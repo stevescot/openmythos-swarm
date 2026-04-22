@@ -39,6 +39,80 @@ Decentralized, volunteer-driven training for the [OpenMythos](https://github.com
    - Combiner nodes can aggregate N workers, then submit to master
    - Reduces network traffic and improves robustness
 
+## Project Concept: How Contributions Are Tracked and Rewarded
+
+This project uses a **two-layer model** for contribution accountability and reward distribution.
+
+### Layer 1 — Off-chain verified work receipts (live now)
+
+Every training contribution is cryptographically bound:
+
+- Each worker has a persistent **Ed25519 keypair** identifying them across rounds.
+- Submissions include a signed attestation with `worker_id`, `round_id`, `dataset_manifest_hash`, `delta_hash`, and a **ZKPoT-lite challenge receipt** (`work_receipt_hash`) that proves the worker processed the correct data.
+- Master verifies signature and identity binding before accepting any submission.
+- After round finalization, the coordinator exports a **deterministic receipt file** per accepted contributor:
+  - `receipt_payload` — canonical JSON of the work claim
+  - `receipt_hash` — SHA-256 of the payload, used for on-chain anchoring
+
+This off-chain receipt is the foundation for provable work claims.
+
+### Layer 2 — On-chain anchoring and reward claiming (zk-eth branch)
+
+When ready for on-chain accounting:
+
+1. Coordinator anchors receipt hashes to `ZkPotContributionRegistry` (Solidity contract).
+2. Contributor calls `claim(...)` on-chain — **they pay their own gas**.
+3. Tokens are minted/transferred to their ETH address.
+
+**The same ETH address that submits the claim (and pays gas) is the contributor identity.**
+
+For security, claims are EIP-712 signed with replay protection:
+
+| Field | Purpose |
+|---|---|
+| `recipient_address` | Where tokens are sent |
+| `amount` | Credits/tokens earned |
+| `nonce` | Prevents replay |
+| `expiry` | Claim window |
+| `chain_id` | Chain binding |
+| `contract_address` | Contract binding |
+
+### Operating without a token (tokenless mode)
+
+You can run the full pipeline without deploying an ERC-20 token:
+- Export receipts + anchor payloads from finalized rounds
+- Store verified contribution records off-chain
+- Deploy token and replay/issue rewards later from those records
+
+**This means contributors can begin earning verifiable credit immediately, before a token exists.**
+
+### Reward lifecycle (end-to-end)
+
+```
+Worker trains locally
+        │
+Worker submits signed attestation
+        │
+Master verifies: signature + identity + delta hash + receipt hash
+        │
+Round finalized → receipt files exported
+        │
+Anchor payload prepared (openmythos-eth-anchor)
+        │
+(Optional) Anchor tx broadcast on testnet/mainnet
+        │
+Contributor calls claim() → tokens minted to their ETH address
+```
+
+### Gas cost
+
+| Phase | Cost |
+|---|---|
+| Testnet (rehearsal) | Free (faucet gas) |
+| L2 mainnet deploy (Base/Arbitrum/OP) | $2–$50 one-time |
+| Claim tx per contributor | Contributor-paid (their gas) |
+| Token issuance/distribution | Minimal ongoing gas at L2 rates |
+
 ## Project Structure
 
 ```
