@@ -1,0 +1,25 @@
+{
+  "profile": "code-open-safe",
+  "generated_at": "2026-04-22T00:00:00Z",
+  "license_allowlist_file": "data/licenses_allowlist.json",
+  "shards": [
+    {
+      "id": "bigcode/the-stack-v2-train-smol-ids:python",
+      "source": "huggingface",
+      "license": "MIXED_ALLOWLIST_FILTERED",
+      "notes": "Example shard identifier. Replace with your curated shard manifests."
+    },
+    {
+      "id": "bigcode/the-stack-v2-train-smol-ids:javascript",
+      "source": "huggingface",
+      "license": "MIXED_ALLOWLIST_FILTERED",
+      "notes": "Example shard identifier. Replace with your curated shard manifests."
+    },
+    {
+      "id": "bigcode/the-stack-v2-train-smol-ids:typescript",
+      "source": "huggingface",
+      "license": "MIXED_ALLOWLIST_FILTERED",
+      "notes": "Example shard identifier. Replace with your curated shard manifests."
+    }
+  ]
+}

@@ -7,8 +7,9 @@ Start this on your master node and it will handle rounds automatically.
 """
 
 import sys
+import json
 from pathlib import Path
-from typing import Dict, List, Callable
+from typing import Dict, List, Callable, Any
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -42,12 +43,64 @@ DATASET_PROFILES: Dict[str, List[str]] = {
 }
 
 
-def print_dataset_profiles() -> None:
+def _load_json(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_code_open_safe_shards(repo_root: Path) -> List[str]:
+    """Load approved code shards from manifest.
+
+    Manifest format supported:
+    - {"shards": ["dataset:split", ...]}
+    - {"shards": [{"id": "dataset:split", ...}, ...]}
+    """
+    manifest_path = repo_root / "data" / "approved_code_shards.json"
+    if not manifest_path.exists():
+        return []
+
+    obj = _load_json(manifest_path)
+    raw_shards = obj.get("shards", []) if isinstance(obj, dict) else []
+    out: List[str] = []
+    for s in raw_shards:
+        if isinstance(s, str) and s.strip():
+            out.append(s.strip())
+        elif isinstance(s, dict):
+            sid = str(s.get("id", "")).strip()
+            if sid:
+                out.append(sid)
+    return out
+
+
+def load_license_allowlist(repo_root: Path) -> List[str]:
+    allowlist_path = repo_root / "data" / "licenses_allowlist.json"
+    if not allowlist_path.exists():
+        return []
+    obj = _load_json(allowlist_path)
+    licenses = obj.get("allowed_licenses", []) if isinstance(obj, dict) else []
+    return [str(x).strip() for x in licenses if str(x).strip()]
+
+
+def get_dataset_profiles(repo_root: Path) -> Dict[str, List[str]]:
+    profiles = dict(DATASET_PROFILES)
+    code_shards = load_code_open_safe_shards(repo_root)
+    if code_shards:
+        profiles["code-open-safe"] = code_shards
+    return profiles
+
+
+def print_dataset_profiles(profiles: Dict[str, List[str]], repo_root: Path) -> None:
     print("Available open dataset profiles:")
-    for name, shards in DATASET_PROFILES.items():
+    for name, shards in profiles.items():
         print(f"\n- {name} ({len(shards)} shards)")
         for idx, shard in enumerate(shards, start=1):
             print(f"  {idx:>2}. {shard}")
+
+    allow = load_license_allowlist(repo_root)
+    if allow:
+        print("\nLicense allowlist used by code-open-safe:")
+        for lic in allow:
+            print(f"  - {lic}")
 
 
 def make_dataset_shard_fn(shards: List[str]) -> Callable[[int], str]:
@@ -113,6 +166,10 @@ def get_config_micro_real(round_num: int) -> TrainingConfig:
 def main() -> None:
     import argparse
 
+    repo_root = Path(__file__).resolve().parent.parent
+    dataset_profiles = get_dataset_profiles(repo_root)
+    dataset_profile_choices = sorted(set(list(dataset_profiles.keys()) + ["code-open-safe"]))
+
     parser = argparse.ArgumentParser(description="Auto-scheduler for federated training")
     parser.add_argument(
         "--state-dir",
@@ -151,7 +208,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--dataset-profile",
-        choices=["fineweb", "open-mix", "instruction"],
+        choices=dataset_profile_choices,
         default="fineweb",
         help="Open dataset profile to rotate across rounds (default: fineweb)",
     )
@@ -169,7 +226,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.list_datasets:
-        print_dataset_profiles()
+        print_dataset_profiles(dataset_profiles, repo_root)
         return
     
     # Select config strategy
@@ -186,7 +243,12 @@ def main() -> None:
         if not shard_list:
             raise ValueError("--dataset-shards was provided but no valid shard values were parsed")
     else:
-        shard_list = DATASET_PROFILES[args.dataset_profile]
+        if args.dataset_profile not in dataset_profiles:
+            raise ValueError(
+                f"Dataset profile '{args.dataset_profile}' is unavailable. "
+                "If using code-open-safe, ensure data/approved_code_shards.json exists."
+            )
+        shard_list = dataset_profiles[args.dataset_profile]
 
     dataset_shard_fn = make_dataset_shard_fn(shard_list)
     

@@ -1,0 +1,16 @@
+{
+  "description": "Allowed licenses for code-open-safe dataset ingestion",
+  "allowed_licenses": [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "CC0-1.0",
+    "Unlicense"
+  ],
+  "notes": [
+    "Exclude unknown or missing licenses by default.",
+    "Exclude GPL/AGPL/LGPL unless policy explicitly allows copyleft training corpora."
+  ]
+}

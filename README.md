@@ -267,6 +267,9 @@ openmythos-scheduler --config micro-real --dataset-profile fineweb --workers 3 -
 
 # Print built-in open dataset profiles
 openmythos-scheduler --list-datasets
+
+# Use manifest-backed code profile (license allowlist filtered)
+openmythos-scheduler --config micro-real --dataset-profile code-open-safe --workers 3
 ```
 
 This runs in a loop:
@@ -284,6 +287,12 @@ Built-in profiles:
 - `fineweb` (default): FineWeb-Edu shards
 - `open-mix`: mixed web-scale open corpora
 - `instruction`: instruction/QA style open datasets
+- `code-open-safe`: curated code shards from `data/approved_code_shards.json`
+
+License governance for code profile:
+- allowed licenses are defined in `data/licenses_allowlist.json`
+- approved code shards are listed in `data/approved_code_shards.json`
+- scheduler only rotates shards listed in the approved manifest
 
 **Args:**
 ```
@@ -293,7 +302,7 @@ Built-in profiles:
 --submission-wait SECS  Time to wait for submissions (default: 1800 = 30min)
 --max-rounds N    Stop after N rounds (default: infinite)
 --config STRATEGY stabilization | production | mixed | micro-real (default: mixed)
---dataset-profile NAME  fineweb | open-mix | instruction (default: fineweb)
+--dataset-profile NAME  fineweb | open-mix | instruction | code-open-safe (default: fineweb)
 --dataset-shards CSV    Optional custom shard list override (comma-separated)
 --list-datasets         Print available open dataset profiles and exit
 ```
