@@ -8,11 +8,55 @@ Start this on your master node and it will handle rounds automatically.
 
 import sys
 from pathlib import Path
+from typing import Dict, List, Callable
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from common import TrainingConfig
 from master.server import MasterCoordinator
+
+
+DATASET_PROFILES: Dict[str, List[str]] = {
+    # Web-scale educational/common crawl text (recommended default)
+    "fineweb": [
+        "HuggingFaceFW/fineweb-edu:sample-10BT",
+        "HuggingFaceFW/fineweb-edu:CC-MAIN-2023-06",
+        "HuggingFaceFW/fineweb-edu:CC-MAIN-2023-14",
+        "HuggingFaceFW/fineweb-edu:CC-MAIN-2023-23",
+        "HuggingFaceFW/fineweb-edu:CC-MAIN-2023-40",
+    ],
+    # Mixed open corpora for broad language modeling coverage
+    "open-mix": [
+        "HuggingFaceFW/fineweb-edu:sample-10BT",
+        "c4:en",
+        "allenai/dolma:v1_7",
+        "togethercomputer/RedPajama-Data-1T:common_crawl",
+        "HuggingFaceFW/fineweb-edu:CC-MAIN-2023-23",
+    ],
+    # Instruction-heavy profile (fine-tuning / alignment style rounds)
+    "instruction": [
+        "OpenAssistant/oasst1:default",
+        "databricks/databricks-dolly-15k:train",
+        "HuggingFaceH4/ultrachat_200k:train_sft",
+    ],
+}
+
+
+def print_dataset_profiles() -> None:
+    print("Available open dataset profiles:")
+    for name, shards in DATASET_PROFILES.items():
+        print(f"\n- {name} ({len(shards)} shards)")
+        for idx, shard in enumerate(shards, start=1):
+            print(f"  {idx:>2}. {shard}")
+
+
+def make_dataset_shard_fn(shards: List[str]) -> Callable[[int], str]:
+    def _pick(round_num: int) -> str:
+        # Round-robin over provided shards so workers get sequential chunks
+        i = (round_num - 1) % len(shards)
+        return shards[i]
+
+    return _pick
 
 
 def get_config_stabilization(round_num: int) -> TrainingConfig:
@@ -53,6 +97,19 @@ def get_config_mixed(round_num: int) -> TrainingConfig:
         return get_config_production(round_num)
 
 
+def get_config_micro_real(round_num: int) -> TrainingConfig:
+    """Micro-round profile for normal internet/GPU contributors (hours, not days)."""
+    return TrainingConfig(
+        seq_len=512,
+        micro_batch=1,
+        grad_accum=4,
+        train_loops=4,
+        learning_rate=2e-4,
+        weight_decay=0.1,
+        target_tokens=5_000_000,
+    )
+
+
 def main() -> None:
     import argparse
 
@@ -88,20 +145,50 @@ def main() -> None:
     )
     parser.add_argument(
         "--config",
-        choices=["stabilization", "production", "mixed"],
+        choices=["stabilization", "production", "mixed", "micro-real"],
         default="mixed",
         help="Configuration strategy (default: mixed = stabilization then production)"
     )
+    parser.add_argument(
+        "--dataset-profile",
+        choices=["fineweb", "open-mix", "instruction"],
+        default="fineweb",
+        help="Open dataset profile to rotate across rounds (default: fineweb)",
+    )
+    parser.add_argument(
+        "--dataset-shards",
+        default=None,
+        help="Optional comma-separated shard list to override dataset profile",
+    )
+    parser.add_argument(
+        "--list-datasets",
+        action="store_true",
+        help="Print available open dataset profiles and exit",
+    )
     
     args = parser.parse_args()
+
+    if args.list_datasets:
+        print_dataset_profiles()
+        return
     
     # Select config strategy
     config_map = {
         "stabilization": get_config_stabilization,
         "production": get_config_production,
         "mixed": get_config_mixed,
+        "micro-real": get_config_micro_real,
     }
     config_fn = config_map[args.config]
+
+    if args.dataset_shards:
+        shard_list = [x.strip() for x in args.dataset_shards.split(",") if x.strip()]
+        if not shard_list:
+            raise ValueError("--dataset-shards was provided but no valid shard values were parsed")
+    else:
+        shard_list = DATASET_PROFILES[args.dataset_profile]
+
+    dataset_shard_fn = make_dataset_shard_fn(shard_list)
     
     # Start master
     print("=" * 80)
@@ -113,6 +200,10 @@ def main() -> None:
     print(f"Submission wait: {args.submission_wait}s")
     print(f"Max rounds: {args.max_rounds or 'infinite'}")
     print(f"Config strategy: {args.config}")
+    print(f"Dataset profile: {args.dataset_profile}")
+    print(f"Dataset shards ({len(shard_list)}):")
+    for idx, shard in enumerate(shard_list, start=1):
+        print(f"  {idx:>2}. {shard}")
     print("=" * 80)
     
     master = MasterCoordinator(state_dir=args.state_dir)
@@ -124,6 +215,7 @@ def main() -> None:
         interval_seconds=args.interval,
         max_rounds=args.max_rounds,
         submission_wait_seconds=args.submission_wait,
+        dataset_shard_fn=dataset_shard_fn,
     )
     
     # Run until user interrupts

@@ -261,6 +261,12 @@ openmythos-scheduler --config production --max-rounds 100
 
 # Mixed (recommended): stabilization then production
 openmythos-scheduler --config mixed --workers 5 --interval 3600 --submission-wait 1800
+
+# Micro rounds on real open data (hours-scale)
+openmythos-scheduler --config micro-real --dataset-profile fineweb --workers 3 --interval 7200 --submission-wait 3600
+
+# Print built-in open dataset profiles
+openmythos-scheduler --list-datasets
 ```
 
 This runs in a loop:
@@ -269,6 +275,16 @@ This runs in a loop:
 3. Aggregates results into next round
 4. Repeats
 
+Dataset handoff behavior:
+- Scheduler rotates through shards in the selected dataset profile each round.
+- The selected shard is written into `dataset_shard` in the round spec.
+- Workers fetch and train on that shard for the round.
+
+Built-in profiles:
+- `fineweb` (default): FineWeb-Edu shards
+- `open-mix`: mixed web-scale open corpora
+- `instruction`: instruction/QA style open datasets
+
 **Args:**
 ```
 --state-dir       Master state directory (default: ./master_state)
@@ -276,7 +292,10 @@ This runs in a loop:
 --interval SECS   Total time per round (default: 3600 = 1hr)
 --submission-wait SECS  Time to wait for submissions (default: 1800 = 30min)
 --max-rounds N    Stop after N rounds (default: infinite)
---config STRATEGY stabilization | production | mixed (default: mixed)
+--config STRATEGY stabilization | production | mixed | micro-real (default: mixed)
+--dataset-profile NAME  fineweb | open-mix | instruction (default: fineweb)
+--dataset-shards CSV    Optional custom shard list override (comma-separated)
+--list-datasets         Print available open dataset profiles and exit
 ```
 
 ### 3.5 Micro-rounds: completing a step in hours, not days
