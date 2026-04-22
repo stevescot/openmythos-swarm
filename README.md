@@ -260,6 +260,75 @@ The exported receipt contains:
 
 These values are the inputs for `anchorReceipt(...)` on `ZkPotContributionRegistry.sol`.
 
+### 3.7 How contribution tracking and rewards are managed
+
+This project uses a two-layer accounting model:
+
+1. **Off-chain verified work receipts** (already live in this repo)
+2. **On-chain anchoring / reward claiming** (zk-eth branch)
+
+#### Identity model (who did the work)
+
+- Every worker has a persistent **Ed25519 keypair** (`openmythos-register` / worker key files).
+- Submissions include a signed attestation payload with:
+  - `worker_id`, `round_id`
+  - `dataset_manifest_hash`
+  - `delta_hash`
+  - challenge/receipt fields (`challenge_*`, `work_receipt_hash`)
+- Master verifies signature + allowlist binding (`worker_id` ↔ public key).
+
+This is the canonical off-chain contribution identity.
+
+#### Work tracking model (what was done)
+
+- For each finalized round, master can export deterministic receipt files using:
+  - `openmythos-master --export-round-receipts N --credits-per-step X`
+- Each receipt includes:
+  - `receipt_payload`
+  - `receipt_hash`
+  - suggested `credits`
+
+Receipts are reproducible and auditable from round artifacts.
+
+#### Reward model (how contributors get paid)
+
+- **Tokenless mode (recommended pre-launch):**
+  - generate/export receipts
+  - prepare anchor payloads
+  - no token deployment required yet
+- **On-chain mode (when ready):**
+  - anchor receipt hashes to `ZkPotContributionRegistry`
+  - then claim/mint reward credits/tokens per policy
+
+#### Gas payment model
+
+You can run a self-pay claim model:
+
+- contributor uses their ETH address to submit claim tx and pay gas
+- the same ETH address can be treated as payout identity
+
+For production, use signed claim payloads (EIP-712 style) with at least:
+
+- `recipient_address`
+- `amount`
+- `nonce`
+- `expiry`
+- `chain_id`
+- `contract_address`
+
+This prevents replay and binds rewards to the intended claimant.
+
+#### Operational lifecycle (end-to-end)
+
+1. Worker trains and submits signed attestation
+2. Master verifies and finalizes round
+3. Master exports receipt files + receipt hash
+4. Operator prepares anchor payload (`openmythos-eth-anchor`)
+5. (Optional) Broadcast anchor tx on testnet/mainnet
+6. Contributor claims reward according to policy
+
+This gives a clear path from verifiable work to accountable rewards.
+
 ### 4. Run Integration Test
 
 ```bash
@@ -338,7 +407,7 @@ ALL TESTS PASSED ✓
 
 4. **Workers submit**
    - Create WorkerSubmission with training stats
-   - Include signed attestation payload (`worker_id`, `round_id`, `dataset_manifest_hash`, `delta_hash`)
+   - Include signed attestation payload (`worker_id`, `round_id`, `dataset_manifest_hash`, `delta_hash`, challenge receipt fields)
    - Submit to master's `submissions/` directory
 
 5. **Master aggregates**
@@ -346,10 +415,12 @@ ALL TESTS PASSED ✓
    - Verify worker attestation signature with worker public key
    - Verify worker identity binding against optional allowlist registry
    - Verify submitted delta file hash matches declared `delta_hash`
+   - Verify challenge-bound receipt hash (`work_receipt_hash`) for contribution integrity
    - Load submitted tensor deltas (`.pt`) from workers
    - Compute weighted tensor merge (`steps_completed` as weights)
    - Save `aggregated_delta.pt` and hash it as canonical round artifact
    - Publish signed RoundResult
+   - Optional: export Ethereum anchor-ready receipts for reward pipeline
 
 6. **Next round**
    - Master publishes new RoundSpec with `prior_checkpoint_hash` = aggregated result
