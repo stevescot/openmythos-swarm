@@ -1,8 +1,8 @@
-# OpenMythos Swarm — Federated Training on Mac Studios
+# OpenMythos Swarm — Federated Training on Mac & GPU
 
-Decentralized, volunteer-driven training for the [OpenMythos](https://github.com/open-mythos/openmythos) 10B language model on Mac Silicon.
+Decentralized, volunteer-driven training for the [OpenMythos](https://github.com/kyegomez/OpenMythos/tree/main) 10B language model on Mac Silicon and NVIDIA GPUs.
 
-> **Note:** This is a complementary project to [OpenMythos](https://github.com/open-mythos/openmythos), designed to enable distributed collaborative training on Mac Studios. It is not a fork of OpenMythos itself, but rather a federated training coordinator that integrates with OpenMythos model code.
+> **Note:** This is a complementary project to [OpenMythos](https://github.com/kyegomez/OpenMythos/tree/main), designed to enable distributed collaborative training. It is not a fork of OpenMythos itself, but rather a federated training coordinator that integrates with OpenMythos model code.
 
 ## Architecture
 
@@ -59,6 +59,23 @@ openmythos-swarm/
 └── requirements.txt     # Dependencies
 ```
 
+## Supported Hardware & Backend Selection
+
+The swarm auto-detects your device and uses the optimal backend:
+
+| Hardware | Backend | Script | Status | Specs |
+|----------|---------|--------|--------|-------|
+| **Mac M-series** | PyTorch MPS | `10b_apple_silicon.py` | ✅ Tested | 64GB+ RAM |
+| **NVIDIA GPU** | PyTorch CUDA | `10b_cross_platform.py` | ✅ Supported | 40GB+ VRAM |
+| **Mixed (Mac + GPU)** | Auto-select | Both | ✅ Compatible | Diverse |
+
+**Minimum Requirements:**
+- **Mac Studio**: 64 GB unified memory (256GB recommended)
+- **NVIDIA GPU**: 40 GB VRAM (80GB H100 ideal)
+- **CPU**: Works for testing only (not practical)
+
+**[See WORKER_SETUP.md for detailed hardware specs, installation, and troubleshooting](WORKER_SETUP.md)**
+
 ## Setup
 
 ### Prerequisites
@@ -94,17 +111,32 @@ This will:
 
 ### 2. Run Worker(s)
 
+**[See WORKER_SETUP.md for detailed hardware requirements and setup](WORKER_SETUP.md)**
+
 In another terminal:
 
 ```bash
-python worker/client.py
+# Mac Studio (auto-detects MPS)
+python worker/contrib.py --worker-id "mac_studio_01"
+
+# NVIDIA GPU (auto-detects CUDA)
+python worker/contrib.py --worker-id "gpu_node_01"
+
+# Check your hardware specs first
+python worker/contrib.py --worker-id "contributor_01" --show-specs
 ```
 
 This will:
+- Auto-detect your device (Apple Silicon MPS or NVIDIA CUDA)
 - Load master's public key
-- Fetch round 1 spec
-- Simulate training (5 steps)
+- Fetch round spec
+- Run actual training (or simulated if testing)
 - Submit results to master
+
+**Supported devices:**
+- ✅ **Mac Studio** (M1/M2/M3 Ultra, 64GB+ RAM)
+- ✅ **NVIDIA GPU** (H100/A100/RTX, 40GB+ VRAM)
+- ✅ **Mixed networks** (Mac + NVIDIA together)
 
 ### 3. Run Auto-Scheduler (Continuous)
 
@@ -336,7 +368,7 @@ MIT
 
 ## Related Projects
 
-- **[OpenMythos](https://github.com/open-mythos/openmythos)** — The 10B language model being trained collaboratively by this swarm
+- **[OpenMythos](https://github.com/kyegomez/OpenMythos/tree/main)** — The 10B language model being trained collaboratively by this swarm
 - **[Flower](https://flower.ai/)** — Production federated learning framework (consider migrating to for scale)
 - **[NVFlare](https://github.com/NVIDIA/NVFlare)** — Enterprise federated learning platform
 
