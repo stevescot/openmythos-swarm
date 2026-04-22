@@ -25,6 +25,7 @@ openmythos-master = "master.server:main"
 openmythos-scheduler = "master.scheduler:main"
 openmythos-worker = "worker.contrib:main"
 openmythos-register = "worker.register:main"
+openmythos-eth-receipt = "eth.receipt:main"
 
 [tool.setuptools]
-packages = ["common", "master", "worker"]
+packages = ["common", "master", "worker", "eth"]
