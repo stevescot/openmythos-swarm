@@ -29,6 +29,7 @@ import argparse
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from common import Ed25519Key
+from common.deps import ensure_dependencies, auto_install_enabled
 
 
 def detect_device() -> str:
@@ -298,8 +299,19 @@ def main() -> None:
     parser.add_argument("--show-specs", action="store_true", help="Show device specs and exit")
     parser.add_argument("--verify-only", action="store_true", help="Verify requirements and exit")
     parser.add_argument("--print-public-key", action="store_true", help="Print worker public key and exit")
+    parser.add_argument("--auto-install-deps", action="store_true", help="Attempt to auto-install missing Python deps")
     
     args = parser.parse_args()
+
+    ensure_dependencies(
+        {
+            "cryptography": "cryptography>=41.0.0",
+            "torch": "torch>=2.0.0",
+            "numpy": "numpy>=1.26.0",
+            "psutil": "psutil>=5.9.0",
+        },
+        auto_install=auto_install_enabled(args.auto_install_deps),
+    )
     
     worker = WorkerContributor(
         worker_id=args.worker_id,

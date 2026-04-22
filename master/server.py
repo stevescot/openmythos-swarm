@@ -8,7 +8,6 @@ import random
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
 import sys
-import torch
 
 # Add parent for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -27,6 +26,8 @@ from common import (
     save_manifest_json,
     load_manifest_json,
 )
+from eth.receipt import receipt_payload, receipt_hash_hex
+from common.deps import ensure_dependencies, auto_install_enabled
 
 
 class MasterCoordinator:
@@ -226,10 +227,12 @@ class MasterCoordinator:
         valid_count = 0
         worker_ids: List[str] = []
         worker_hashes: List[str] = []
-        merged_delta: Dict[str, torch.Tensor] = {}
+        merged_delta: Dict[str, object] = {}
         merged_tensor_count = 0
         tensor_contrib_count = 0
         rejected_count = 0
+
+        import torch
 
         for sub_file in submissions:
             try:
@@ -448,6 +451,57 @@ class MasterCoordinator:
             "public_key": self.key.public_pem[:100] + "...",
         }
 
+    def export_round_receipts(self, round_id: int, out_dir: Optional[str] = None, credits_per_step: int = 1) -> List[Path]:
+        """Export anchor-ready receipt files for all submissions in a finalized round."""
+        round_dir = self.rounds_dir / f"round_{round_id:04d}"
+        result_file = round_dir / "result.json"
+        if not result_file.exists():
+            raise ValueError(f"Round {round_id} has not been finalized (missing result.json)")
+
+        sub_dir = self.submissions_dir / f"round_{round_id:04d}"
+        if not sub_dir.exists():
+            raise ValueError(f"No submissions directory for round {round_id}")
+
+        out_path = Path(out_dir) if out_dir else (round_dir / "receipts")
+        out_path.mkdir(parents=True, exist_ok=True)
+
+        exported: List[Path] = []
+        for sub_file in sorted(sub_dir.glob("*.json")):
+            data = json.loads(sub_file.read_text())
+            att = data.get("attestation_payload", {})
+
+            payload = receipt_payload(
+                worker_id=str(att.get("worker_id", data.get("worker_id", "unknown"))),
+                round_id=int(att.get("round_id", data.get("round_id", round_id))),
+                dataset_manifest_hash=str(att.get("dataset_manifest_hash", "")),
+                delta_hash=str(att.get("delta_hash", data.get("delta_hash", ""))),
+                challenge_input_hash=str(att.get("challenge_input_hash", "")),
+                challenge_pre_output_hash=str(att.get("challenge_pre_output_hash", "")),
+                challenge_post_output_hash=str(att.get("challenge_post_output_hash", "")),
+                challenge_pre_loss=float(att.get("challenge_pre_loss", 0.0)),
+                challenge_post_loss=float(att.get("challenge_post_loss", 0.0)),
+                steps_completed=int(att.get("steps_completed", data.get("steps_completed", 0))),
+                timestamp=str(att.get("timestamp", data.get("timestamp", ""))),
+            )
+
+            r_hash = receipt_hash_hex(payload)
+            steps = int(payload.get("steps_completed", 0))
+            credits = max(0, steps * max(0, int(credits_per_step)))
+
+            out_obj = {
+                "worker_id": payload["worker_id"],
+                "round_id": payload["round_id"],
+                "receipt_payload": payload,
+                "receipt_hash": r_hash,
+                "credits": credits,
+                "source_submission": str(sub_file),
+            }
+            out_file = out_path / f"{payload['worker_id']}_receipt.json"
+            out_file.write_text(json.dumps(out_obj, indent=2))
+            exported.append(out_file)
+
+        return exported
+
     def start_scheduler(
         self,
         config_fn: Callable[[int], TrainingConfig],
@@ -545,7 +599,20 @@ def main() -> None:
     parser.add_argument("--list-workers", action="store_true", help="List registered workers and exit")
     parser.add_argument("--register-worker-id", default=None, help="Register worker id")
     parser.add_argument("--register-worker-pubkey-file", default=None, help="Path to worker public key PEM")
+    parser.add_argument("--export-round-receipts", type=int, default=None, help="Export anchor-ready receipts for round N")
+    parser.add_argument("--export-out-dir", default=None, help="Optional output directory for exported receipts")
+    parser.add_argument("--credits-per-step", type=int, default=1, help="Credits per accepted training step")
+    parser.add_argument("--auto-install-deps", action="store_true", help="Attempt to auto-install missing Python deps")
     args = parser.parse_args()
+
+    ensure_dependencies(
+        {
+            "cryptography": "cryptography>=41.0.0",
+            "torch": "torch>=2.0.0",
+            "numpy": "numpy>=1.26.0",
+        },
+        auto_install=auto_install_enabled(args.auto_install_deps),
+    )
 
     master = MasterCoordinator(state_dir=args.state_dir)
 
@@ -561,6 +628,17 @@ def main() -> None:
         pub = Path(args.register_worker_pubkey_file).read_text()
         master.register_worker(args.register_worker_id, pub, metadata={"source": "cli"})
         print(f"Registered worker: {args.register_worker_id}")
+        return
+
+    if args.export_round_receipts is not None:
+        files = master.export_round_receipts(
+            round_id=args.export_round_receipts,
+            out_dir=args.export_out_dir,
+            credits_per_step=args.credits_per_step,
+        )
+        print(f"Exported {len(files)} receipt files")
+        for f in files:
+            print(f"  - {f}")
         return
 
     if args.publish_demo:

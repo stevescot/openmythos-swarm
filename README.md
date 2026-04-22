@@ -185,6 +185,9 @@ The swarm auto-detects your device and uses the optimal backend:
    - `openmythos-master`
    - `openmythos-scheduler`
    - `openmythos-worker`
+   - `openmythos-register`
+   - `openmythos-eth-receipt`
+   - `openmythos-eth-anchor`
 
    > On Windows, these may install under `%APPDATA%\Python\Python313\Scripts`. Add that directory to `PATH` if commands are not found.
 
@@ -229,6 +232,16 @@ This will:
 - Run actual training (or simulated if testing)
 - Submit results to master
 
+If dependencies are missing on a contributor machine, you can opt-in to automatic install:
+
+```bash
+# one-shot
+openmythos-worker --worker-id "contributor_01" --auto-install-deps
+
+# or via environment variable
+OPENMYTHOS_AUTO_INSTALL_DEPS=1 openmythos-worker --worker-id "contributor_01"
+```
+
 **Supported devices:**
 - ✅ **Mac Studio** (M1/M2/M3 Ultra, 64GB+ RAM)
 - ✅ **NVIDIA GPU** (H100/A100/RTX, 40GB+ VRAM)
@@ -266,6 +279,74 @@ This runs in a loop:
 --config STRATEGY stabilization | production | mixed (default: mixed)
 ```
 
+### 3.5 Micro-rounds: completing a step in hours, not days
+
+By default a round is large (100M–500M tokens). For contributors on a normal home connection or consumer GPU, a **micro-round** configuration breaks training into 2–4 hour chunks. Multiple contributors each complete one micro-round and the master chains them together.
+
+#### Bandwidth per round — what actually moves
+
+| Artifact | Size | Direction | Notes |
+|---|---|---|---|
+| Round spec (JSON) | ~2 KB | ↓ download | Tiny — config + hashes |
+| Dataset shard | 10–100 MB | ↓ download | Only once per shard, re-used across rounds |
+| Gradient delta (`.pt`) | **~40 GB** (full, fp32) | ↑ upload | 10B model × 4 bytes/param |
+| Gradient delta (compressed/quantized) | **~5–10 GB** | ↑ upload | bf16 or int8 delta compression |
+| Round result manifest | ~2 KB | ↓ download | Signed result hash |
+
+**On a 100 Mbps home upload:** a full fp32 delta takes ~55 minutes. With bf16 compression: ~7–14 minutes.
+
+#### Practical micro-round sizes
+
+| Mode | `target_tokens` | `train_loops` | Estimated time (Mac M3 Ultra) | Upload size (bf16 delta) |
+|---|---|---|---|---|
+| **Quick smoke test** | 500K | 2 | 10–20 min | ~5 GB |
+| **Micro-round** | 5M | 4 | 1–2 hrs | ~5 GB |
+| **Standard round** | 50M | 8 | 4–8 hrs | ~5 GB |
+| **Production round** | 500M | 24 | 2–3 days | ~5 GB |
+
+> **Note:** Delta size is determined by model size (10B params), not by `target_tokens`. Compression is the key lever for upload time. Longer rounds just train more steps before the upload happens.
+
+#### Recommended micro-round config for home contributors
+
+```python
+# ~1–2 hour round, ~5 GB upload (bf16 delta)
+TrainingConfig(
+    seq_len=512,          # shorter sequences = more steps per GB
+    micro_batch=1,
+    grad_accum=4,
+    train_loops=4,        # 4 inner loops per round
+    learning_rate=2e-4,
+    weight_decay=0.1,
+    target_tokens=5_000_000,  # 5M tokens per round
+)
+```
+
+Schedule this with:
+
+```bash
+openmythos-scheduler \
+  --config stabilization \
+  --workers 3 \
+  --interval 7200 \
+  --submission-wait 3600 \
+  --max-rounds 20
+```
+
+Each round closes every 2 hours. 20 rounds × 5M tokens = 100M tokens total — a meaningful contribution on a standard broadband connection.
+
+#### How chaining works
+
+```
+Round 1 (contributor A, 5M tokens)
+   └→ aggregated_delta_1.pt + checkpoint_hash_1
+Round 2 (contributor B, 5M tokens) ← prior_checkpoint_hash = checkpoint_hash_1
+   └→ aggregated_delta_2.pt + checkpoint_hash_2
+Round 3 (contributor A+C, 5M tokens) ← prior_checkpoint_hash = checkpoint_hash_2
+   └→ ...
+```
+
+Contributors do **not** need to hold the full model checkpoint locally — only their delta for that round. The master chains them via hashes.
+
 ### 3.5 Register Worker Identity (one-liner after `pip install`)
 
 Workers sign every submission with a persistent Ed25519 private key.
@@ -293,6 +374,102 @@ openmythos-master --state-dir ./master_state --list-workers
 
 Keys are stored in `~/.openmythos-swarm/keys/` and re-used across rounds.
 If an allowlist exists, submissions are accepted only when `worker_id` and public key match the registered record.
+
+### 3.6 zk-eth runbook (receipt export + anchor payload)
+
+On the `zk-eth` branch, you can export finalized round receipts and prepare Ethereum anchor payloads:
+
+```bash
+# 1) Finalize a round first (normal flow)
+openmythos-master --state-dir ./master_state --status
+
+# 2) Export anchor-ready receipts from finalized round N
+openmythos-master --state-dir ./master_state \
+   --export-round-receipts N \
+   --credits-per-step 2
+
+# 3) Prepare anchor calldata payload from one exported receipt
+openmythos-eth-anchor \
+   --receipt-file ./master_state/rounds/round_000N/receipts/<worker>_receipt.json \
+   --worker-address 0x0000000000000000000000000000000000000000 \
+   --credits 100
+```
+
+The exported receipt contains:
+- deterministic `receipt_payload`
+- `receipt_hash` (SHA256 canonical hash, hex)
+- suggested `credits`
+
+These values are the inputs for `anchorReceipt(...)` on `ZkPotContributionRegistry.sol`.
+
+### 3.7 How contribution tracking and rewards are managed
+
+This project uses a two-layer accounting model:
+
+1. **Off-chain verified work receipts** (already live in this repo)
+2. **On-chain anchoring / reward claiming** (zk-eth branch)
+
+#### Identity model (who did the work)
+
+- Every worker has a persistent **Ed25519 keypair** (`openmythos-register` / worker key files).
+- Submissions include a signed attestation payload with:
+  - `worker_id`, `round_id`
+  - `dataset_manifest_hash`
+  - `delta_hash`
+  - challenge/receipt fields (`challenge_*`, `work_receipt_hash`)
+- Master verifies signature + allowlist binding (`worker_id` ↔ public key).
+
+This is the canonical off-chain contribution identity.
+
+#### Work tracking model (what was done)
+
+- For each finalized round, master can export deterministic receipt files using:
+  - `openmythos-master --export-round-receipts N --credits-per-step X`
+- Each receipt includes:
+  - `receipt_payload`
+  - `receipt_hash`
+  - suggested `credits`
+
+Receipts are reproducible and auditable from round artifacts.
+
+#### Reward model (how contributors get paid)
+
+- **Tokenless mode (recommended pre-launch):**
+  - generate/export receipts
+  - prepare anchor payloads
+  - no token deployment required yet
+- **On-chain mode (when ready):**
+  - anchor receipt hashes to `ZkPotContributionRegistry`
+  - then claim/mint reward credits/tokens per policy
+
+#### Gas payment model
+
+You can run a self-pay claim model:
+
+- contributor uses their ETH address to submit claim tx and pay gas
+- the same ETH address can be treated as payout identity
+
+For production, use signed claim payloads (EIP-712 style) with at least:
+
+- `recipient_address`
+- `amount`
+- `nonce`
+- `expiry`
+- `chain_id`
+- `contract_address`
+
+This prevents replay and binds rewards to the intended claimant.
+
+#### Operational lifecycle (end-to-end)
+
+1. Worker trains and submits signed attestation
+2. Master verifies and finalizes round
+3. Master exports receipt files + receipt hash
+4. Operator prepares anchor payload (`openmythos-eth-anchor`)
+5. (Optional) Broadcast anchor tx on testnet/mainnet
+6. Contributor claims reward according to policy
+
+This gives a clear path from verifiable work to accountable rewards.
 
 ### 4. Run Integration Test
 
@@ -372,7 +549,7 @@ ALL TESTS PASSED ✓
 
 4. **Workers submit**
    - Create WorkerSubmission with training stats
-   - Include signed attestation payload (`worker_id`, `round_id`, `dataset_manifest_hash`, `delta_hash`)
+   - Include signed attestation payload (`worker_id`, `round_id`, `dataset_manifest_hash`, `delta_hash`, challenge receipt fields)
    - Submit to master's `submissions/` directory
 
 5. **Master aggregates**
@@ -380,10 +557,12 @@ ALL TESTS PASSED ✓
    - Verify worker attestation signature with worker public key
    - Verify worker identity binding against optional allowlist registry
    - Verify submitted delta file hash matches declared `delta_hash`
+   - Verify challenge-bound receipt hash (`work_receipt_hash`) for contribution integrity
    - Load submitted tensor deltas (`.pt`) from workers
    - Compute weighted tensor merge (`steps_completed` as weights)
    - Save `aggregated_delta.pt` and hash it as canonical round artifact
    - Publish signed RoundResult
+   - Optional: export Ethereum anchor-ready receipts for reward pipeline
 
 6. **Next round**
    - Master publishes new RoundSpec with `prior_checkpoint_hash` = aggregated result
