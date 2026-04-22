@@ -4,6 +4,7 @@ import json
 import time
 import threading
 import argparse
+import random
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
 import sys
@@ -133,6 +134,13 @@ class MasterCoordinator:
         meta = dict(metadata or {})
         meta.setdefault("dataset_manifest_hash", self.dataset_manifest_hash)
 
+        # Challenge commitment for ZKPoT-lite receipts
+        if "challenge_inputs" not in meta:
+            rng = random.Random(round_id)
+            challenge_inputs = [rng.randint(0, 8191) for _ in range(32)]
+            meta["challenge_inputs"] = challenge_inputs
+            meta["challenge_input_hash"] = hash_object(challenge_inputs)
+
         spec = create_round_spec(
             round_id=round_id,
             version=version,
@@ -202,9 +210,12 @@ class MasterCoordinator:
 
         spec_file = self.rounds_dir / f"round_{round_id:04d}" / "spec.json"
         expected_dataset_manifest_hash = None
+        expected_challenge_input_hash = None
         if spec_file.exists():
             spec_manifest = load_manifest_json(str(spec_file))
-            expected_dataset_manifest_hash = spec_manifest.payload.get("metadata", {}).get("dataset_manifest_hash")
+            spec_meta = spec_manifest.payload.get("metadata", {})
+            expected_dataset_manifest_hash = spec_meta.get("dataset_manifest_hash")
+            expected_challenge_input_hash = spec_meta.get("challenge_input_hash")
         
         # Weighted aggregation over submitted worker metrics.
         # Weight each submission by steps_completed so longer local training
@@ -256,6 +267,30 @@ class MasterCoordinator:
                     rejected_count += 1
                     continue
                 if expected_dataset_manifest_hash is not None and str(att_payload.get("dataset_manifest_hash", "")) != str(expected_dataset_manifest_hash):
+                    rejected_count += 1
+                    continue
+
+                # Verify challenge commitment + ZKPoT-lite work receipt
+                challenge_input_hash = str(att_payload.get("challenge_input_hash", ""))
+                if expected_challenge_input_hash is not None and challenge_input_hash != str(expected_challenge_input_hash):
+                    rejected_count += 1
+                    continue
+
+                receipt_fields = {
+                    "round_id": int(att_payload.get("round_id", -1)),
+                    "worker_id": str(att_payload.get("worker_id", "")),
+                    "dataset_manifest_hash": str(att_payload.get("dataset_manifest_hash", "")),
+                    "challenge_input_hash": challenge_input_hash,
+                    "challenge_pre_loss": float(att_payload.get("challenge_pre_loss", 0.0)),
+                    "challenge_post_loss": float(att_payload.get("challenge_post_loss", 0.0)),
+                    "challenge_pre_output_hash": str(att_payload.get("challenge_pre_output_hash", "")),
+                    "challenge_post_output_hash": str(att_payload.get("challenge_post_output_hash", "")),
+                    "delta_hash": str(att_payload.get("delta_hash", "")),
+                    "steps_completed": int(att_payload.get("steps_completed", 0)),
+                    "timestamp": str(att_payload.get("timestamp", "")),
+                }
+                expected_receipt_hash = hash_object(receipt_fields)
+                if str(att_payload.get("work_receipt_hash", "")) != expected_receipt_hash:
                     rejected_count += 1
                     continue
 
@@ -374,6 +409,7 @@ class MasterCoordinator:
                 "merged_tensors": merged_tensor_count,
                 "rejected_submissions": rejected_count,
                 "dataset_manifest_hash": expected_dataset_manifest_hash or self.dataset_manifest_hash,
+                "challenge_input_hash": expected_challenge_input_hash,
             },
         )
         

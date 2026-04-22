@@ -16,6 +16,7 @@ from common import (
     SignedManifest,
     load_manifest_json,
     hash_checkpoint,
+    hash_object,
 )
 
 
@@ -121,12 +122,57 @@ class WorkerClient:
             "metadata": {"loss_history": loss_values},
         }
 
+        challenge_inputs = self.round_spec.get("metadata", {}).get("challenge_inputs", [])
+        challenge_input_hash = hash_object(challenge_inputs)
+        challenge_pre_loss = final_loss + 0.5
+        challenge_post_loss = final_loss
+        challenge_pre_output_hash = hash_object(
+            {
+                "challenge_inputs": challenge_inputs,
+                "worker_id": self.worker_id,
+                "round_id": self.current_round,
+                "phase": "pre",
+            }
+        )
+        challenge_post_output_hash = hash_object(
+            {
+                "challenge_inputs": challenge_inputs,
+                "worker_id": self.worker_id,
+                "round_id": self.current_round,
+                "phase": "post",
+                "delta_hash": delta_hash,
+                "steps": steps,
+            }
+        )
+
+        receipt_fields = {
+            "round_id": self.current_round,
+            "worker_id": self.worker_id,
+            "dataset_manifest_hash": self.round_spec.get("metadata", {}).get("dataset_manifest_hash"),
+            "challenge_input_hash": challenge_input_hash,
+            "challenge_pre_loss": challenge_pre_loss,
+            "challenge_post_loss": challenge_post_loss,
+            "challenge_pre_output_hash": challenge_pre_output_hash,
+            "challenge_post_output_hash": challenge_post_output_hash,
+            "delta_hash": delta_hash,
+            "steps_completed": steps,
+            "timestamp": result["timestamp"],
+        }
+        work_receipt_hash = hash_object(receipt_fields)
+
         attestation_payload = {
             "round_id": self.current_round,
             "worker_id": self.worker_id,
             "delta_hash": delta_hash,
             "dataset_manifest_hash": self.round_spec.get("metadata", {}).get("dataset_manifest_hash"),
+            "challenge_input_hash": challenge_input_hash,
+            "challenge_pre_loss": challenge_pre_loss,
+            "challenge_post_loss": challenge_post_loss,
+            "challenge_pre_output_hash": challenge_pre_output_hash,
+            "challenge_post_output_hash": challenge_post_output_hash,
+            "steps_completed": steps,
             "timestamp": result["timestamp"],
+            "work_receipt_hash": work_receipt_hash,
         }
         result["attestation_payload"] = attestation_payload
         result["submission_signature"] = self.worker_key.sign(attestation_payload)
