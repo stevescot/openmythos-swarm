@@ -92,6 +92,10 @@ def test_basic_round():
         result_manifest = master.finalize_round(round_id=1)
         assert result_manifest is not None, "Failed to finalize round"
         assert result_manifest.payload["valid_submissions"] == 3, "Expected 3 valid submissions"
+        assert result_manifest.payload["aggregation_method"] == "weighted_step_avg", "Unexpected aggregation method"
+        assert result_manifest.payload["metadata"]["total_weight_steps"] > 0, "Expected positive weight steps"
+        assert result_manifest.payload["metadata"]["workers_included"] == 3, "Expected all workers included"
+        assert result_manifest.payload["global_checkpoint_hash"] != "0" * 64, "Expected non-placeholder checkpoint hash"
         print("[TEST] ✓ Round aggregated successfully")
         
         # Verify manifest structure

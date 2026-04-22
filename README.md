@@ -1,6 +1,6 @@
-# OpenMythos Swarm — Federated Training on Mac & GPU
+# OpenMythos Swarm — Federated Training on Mac, NVIDIA, and AMD
 
-Decentralized, volunteer-driven training for the [OpenMythos](https://github.com/kyegomez/OpenMythos/tree/main) 10B language model on Mac Silicon and NVIDIA GPUs.
+Decentralized, volunteer-driven training for the [OpenMythos](https://github.com/kyegomez/OpenMythos/tree/main) 10B language model on Apple Silicon, NVIDIA CUDA, and AMD ROCm GPUs.
 
 > **Note:** This is a complementary project to [OpenMythos](https://github.com/kyegomez/OpenMythos/tree/main), designed to enable distributed collaborative training. It is not a fork of OpenMythos itself, but rather a federated training coordinator that integrates with OpenMythos model code.
 
@@ -72,11 +72,13 @@ The swarm auto-detects your device and uses the optimal backend:
 |----------|---------|--------|--------|-------|
 | **Mac M-series** | PyTorch MPS | `10b_apple_silicon.py` | ✅ Tested | 64GB+ RAM |
 | **NVIDIA GPU** | PyTorch CUDA | `10b_cross_platform.py` | ✅ Supported | 40GB+ VRAM |
-| **Mixed (Mac + GPU)** | Auto-select | Both | ✅ Compatible | Diverse |
+| **AMD GPU (ROCm)** | PyTorch ROCm | `10b_cross_platform.py` | ✅ Supported (Linux ROCm) | 40GB+ VRAM |
+| **Mixed (Mac + NVIDIA + AMD)** | Auto-select | Both | ✅ Compatible | Diverse |
 
 **Minimum Requirements:**
 - **Mac Studio**: 64 GB unified memory (256GB recommended)
 - **NVIDIA GPU**: 40 GB VRAM (80GB H100 ideal)
+- **AMD GPU (ROCm)**: 40 GB VRAM (MI210/MI250/MI300 preferred)
 - **CPU**: Works for testing only (not practical)
 
 **[See WORKER_SETUP.md for detailed hardware specs, installation, and troubleshooting](WORKER_SETUP.md)**
@@ -127,12 +129,15 @@ python worker/contrib.py --worker-id "mac_studio_01"
 # NVIDIA GPU (auto-detects CUDA)
 python worker/contrib.py --worker-id "gpu_node_01"
 
+# AMD ROCm GPU (auto-detects ROCm)
+python worker/contrib.py --worker-id "amd_node_01"
+
 # Check your hardware specs first
 python worker/contrib.py --worker-id "contributor_01" --show-specs
 ```
 
 This will:
-- Auto-detect your device (Apple Silicon MPS or NVIDIA CUDA)
+- Auto-detect your device (Apple Silicon MPS, NVIDIA CUDA, or AMD ROCm)
 - Load master's public key
 - Fetch round spec
 - Run actual training (or simulated if testing)
@@ -141,7 +146,8 @@ This will:
 **Supported devices:**
 - ✅ **Mac Studio** (M1/M2/M3 Ultra, 64GB+ RAM)
 - ✅ **NVIDIA GPU** (H100/A100/RTX, 40GB+ VRAM)
-- ✅ **Mixed networks** (Mac + NVIDIA together)
+- ✅ **AMD ROCm GPU** (MI210/MI250/MI300 or ROCm-supported Radeon PRO)
+- ✅ **Mixed networks** (Mac + NVIDIA + AMD together)
 
 ### 3. Run Auto-Scheduler (Continuous)
 
@@ -250,8 +256,8 @@ ALL TESTS PASSED ✓
 
 5. **Master aggregates**
    - Collect all valid submissions
-   - Apply robust aggregation (clipping, outlier removal)
-   - Compute new global checkpoint
+   - Compute weighted aggregation across worker metrics (`steps_completed` as weights)
+   - Derive deterministic aggregate checkpoint fingerprint hash
    - Publish signed RoundResult
 
 6. **Next round**

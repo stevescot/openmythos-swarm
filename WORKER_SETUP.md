@@ -38,6 +38,24 @@ python worker/contrib.py --worker-id "gpu_node_01" --verify-only
 python worker/contrib.py --worker-id "gpu_node_01"
 ```
 
+### AMD ROCm GPU (Linux)
+
+```bash
+# Clone training repo
+git clone https://github.com/stevescot/openmythos-10b-apple-silicon.git
+cd openmythos-10b-apple-silicon
+pip install -r requirements.txt
+
+# Check hardware
+python worker/contrib.py --worker-id "amd_node_01" --show-specs
+
+# Verify requirements
+python worker/contrib.py --worker-id "amd_node_01" --verify-only
+
+# Join training network
+python worker/contrib.py --worker-id "amd_node_01"
+```
+
 ## Hardware Requirements
 
 ### Apple Silicon (Mac Studio)
@@ -80,6 +98,26 @@ python worker/contrib.py --worker-id "gpu_node_01"
 
 **Cost:** $8k-$50k+ for production setup (rental: $1-5/hour)
 
+### AMD ROCm GPU (Linux)
+
+| Spec | Minimum | Recommended | Production |
+|------|---------|-------------|------------|
+| **GPU VRAM** | 40 GB | 64 GB+ | 128GB+ (MI250/MI300) |
+| **CPU RAM** | 32 GB | 128 GB | 256 GB+ |
+| **Storage** | 500 GB | 1 TB | 2 TB NVMe |
+| **ROCm** | 6.0+ | 6.1+ | 6.1+ |
+| **OS** | Ubuntu 22.04 | Ubuntu 22.04/24.04 | Ubuntu 22.04 LTS |
+| **Network** | 1 Gbps | 10 Gbps | 40 Gbps |
+
+**Examples:**
+- ✅✅ **AMD MI300X (192GB)** — Best for large rounds
+- ✅✅ **AMD MI250 (128GB)** — Excellent
+- ✅ **AMD MI210 (64GB)** — Good
+- ✅ **AMD Radeon PRO W7900 (48GB)** — Works (ROCm support-dependent)
+- ⚠️ **AMD RX 7900 XTX (24GB)** — Marginal for 10B, ROCm compatibility varies
+
+**Cost:** $6k-$40k+ for production setup (rental varies by provider)
+
 ## Backend Auto-Detection
 
 The worker automatically selects the right backend:
@@ -91,6 +129,7 @@ worker = WorkerContributor("mac_studio_01")
 # Auto-detects:
 # - Mac with M-series → uses MPS (10b_apple_silicon.py)
 # - NVIDIA GPU → uses CUDA (10b_cross_platform.py)
+# - AMD ROCm GPU → uses ROCm via CUDA-compatible PyTorch API
 # - No GPU → uses CPU (slow, for testing)
 ```
 
@@ -99,6 +138,9 @@ worker = WorkerContributor("mac_studio_01")
 ```bash
 # Force CUDA even if not auto-detected
 python worker/contrib.py --worker-id "gpu_01" --device cuda
+
+# Force ROCm
+python worker/contrib.py --worker-id "amd_01" --device rocm
 
 # Force MPS even if not auto-detected
 python worker/contrib.py --worker-id "mac_01" --device mps
@@ -170,6 +212,28 @@ pip install -r requirements.txt
 
 # 5. Verify
 python -c "import torch; print(torch.cuda.is_available())"  # Should print True
+```
+
+### AMD ROCm GPU (Linux)
+
+```bash
+# 1. Install ROCm 6.0+ (Ubuntu recommended)
+#    https://rocm.docs.amd.com/en/latest/deploy/linux/quick_start.html
+
+# 2. Install Python 3.10+
+python --version  # Should be 3.10+
+
+# 3. Clone repos
+git clone https://github.com/stevescot/openmythos-swarm.git
+git clone https://github.com/stevescot/openmythos-10b-apple-silicon.git
+
+# 4. Install dependencies (ROCm-enabled torch build required)
+cd openmythos-10b-apple-silicon
+pip install -r requirements.txt
+
+# 5. Verify ROCm PyTorch build
+python -c "import torch; print('cuda=', torch.cuda.is_available(), 'hip=', torch.version.hip)"
+# Expected: cuda=True and hip is not None
 ```
 
 ## Running a Worker

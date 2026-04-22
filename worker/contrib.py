@@ -29,10 +29,21 @@ import argparse
 
 
 def detect_device() -> str:
-    """Auto-detect compute device."""
+    """Auto-detect compute device.
+
+    Returns:
+      - "rocm" for AMD ROCm builds
+      - "cuda" for NVIDIA CUDA builds
+      - "mps" for Apple Silicon
+      - "cpu" fallback
+    """
     try:
         import torch
+
         if torch.cuda.is_available():
+            # ROCm builds expose CUDA-compatible API but set torch.version.hip
+            if getattr(torch.version, "hip", None):
+                return "rocm"
             return "cuda"
         if torch.backends.mps.is_available():
             return "mps"
@@ -81,6 +92,25 @@ def get_device_info(device: str) -> Dict:
                 "NVIDIA L40S (48GB) ✓ (good)",
                 "NVIDIA RTX 6000 Ada (48GB) ✓ (good)",
                 "NVIDIA RTX 4090 (24GB) ~ (marginal)",
+            ]
+        },
+        "rocm": {
+            "name": "AMD ROCm GPU",
+            "min_ram_gb": 32,
+            "recommended_ram_gb": 128,
+            "min_vram_gb": 40,
+            "supported_models": ["10b"],
+            "script": "10b_cross_platform.py",
+            "seq_len_default": 8192,
+            "batch_default": 8,
+            "grad_accum_default": 4,
+            "frameworks": ["PyTorch ROCm", "ROCm 6.0+"],
+            "hardware_examples": [
+                "AMD Instinct MI210 (64GB) ✓✓ (ideal)",
+                "AMD Instinct MI250 (128GB) ✓✓ (ideal)",
+                "AMD Instinct MI300X (192GB) ✓✓✓ (best)",
+                "AMD Radeon PRO W7900 (48GB) ✓ (good)",
+                "AMD Radeon RX 7900 XTX (24GB) ~ (marginal, ROCm support varies)",
             ]
         },
         "cpu": {
@@ -146,9 +176,12 @@ class WorkerContributor:
             print(f"  ✗ FAIL: Insufficient RAM")
             return False
         
-        if self.device == "cuda":
+        if self.device in {"cuda", "rocm"}:
             try:
                 import torch
+                if self.device == "rocm" and not getattr(torch.version, "hip", None):
+                    print("  ✗ FAIL: ROCm backend requested but this PyTorch build is not ROCm-enabled")
+                    return False
                 for i in range(torch.cuda.device_count()):
                     vram = torch.cuda.get_device_properties(i).total_memory / (1024**3)
                     print(f"  GPU {i} VRAM: {vram:.1f} GB (min required: {self.device_info['min_vram_gb']} GB)")
@@ -186,7 +219,9 @@ class WorkerContributor:
         env["MYTHOS_MICRO_BATCH"] = str(config.get("micro_batch", self.device_info["batch_default"]))
         env["MYTHOS_GRAD_ACCUM"] = str(config.get("grad_accum", self.device_info["grad_accum_default"]))
         env["MYTHOS_TRAIN_LOOPS"] = str(config.get("train_loops", 8))
-        env["MYTHOS_DEVICE"] = self.device
+        # cross-platform trainer uses torch.device("cuda") for both CUDA and ROCm
+        env["MYTHOS_DEVICE"] = "cuda" if self.device in {"cuda", "rocm"} else self.device
+        env["MYTHOS_BACKEND"] = self.device
         
         try:
             result = subprocess.run(
@@ -243,7 +278,7 @@ if __name__ == "__main__":
     parser.add_argument("--worker-id", default="contributor_001", help="Worker identifier")
     parser.add_argument("--master-url", default="./master_state", help="Master state dir or URL")
     parser.add_argument("--training-repo", default="../openmythos-10b-apple-silicon", help="Path to training repo")
-    parser.add_argument("--device", help="Force device (mps/cuda/cpu); auto-detect if unset")
+    parser.add_argument("--device", help="Force device (mps/cuda/rocm/cpu); auto-detect if unset")
     parser.add_argument("--show-specs", action="store_true", help="Show device specs and exit")
     parser.add_argument("--verify-only", action="store_true", help="Verify requirements and exit")
     

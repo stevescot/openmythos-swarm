@@ -141,29 +141,68 @@ class MasterCoordinator:
         submissions = list(submission_dir.glob("*.json"))
         print(f"[Master] Aggregating {len(submissions)} submissions for round {round_id}")
         
-        # Simplified: just count and report stats
-        total_loss = 0.0
+        # Weighted aggregation over submitted worker metrics.
+        # Weight each submission by steps_completed so longer local training
+        # contributes proportionally more.
+        weighted_loss_sum = 0.0
+        weighted_gnorm_sum = 0.0
+        total_weight = 0
         valid_count = 0
+        worker_ids: List[str] = []
+        worker_hashes: List[str] = []
+
         for sub_file in submissions:
             try:
                 data = json.loads(sub_file.read_text())
-                total_loss += data.get("final_loss", 0.0)
+                steps = int(data.get("steps_completed", 0))
+                loss = float(data.get("final_loss", 0.0))
+                gnorm = float(data.get("gradient_norm", 0.0))
+                worker_id = str(data.get("worker_id", sub_file.stem))
+                delta_hash = str(data.get("delta_hash", ""))
+
+                if steps <= 0:
+                    continue
+
+                weighted_loss_sum += loss * steps
+                weighted_gnorm_sum += gnorm * steps
+                total_weight += steps
                 valid_count += 1
-            except:
-                pass
-        
-        avg_loss = total_loss / max(valid_count, 1)
+                worker_ids.append(worker_id)
+                if delta_hash:
+                    worker_hashes.append(delta_hash)
+            except Exception:
+                continue
+
+        avg_loss = weighted_loss_sum / max(total_weight, 1)
+        avg_gnorm = weighted_gnorm_sum / max(total_weight, 1)
+
+        # Deterministic checkpoint hash placeholder derived from submitted deltas.
+        # (Next step for full tensor FedAvg: load delta tensors and merge weights.)
+        aggregate_fingerprint = {
+            "round_id": round_id,
+            "worker_ids": sorted(worker_ids),
+            "delta_hashes": sorted(worker_hashes),
+            "total_weight": total_weight,
+            "avg_loss": avg_loss,
+            "avg_gnorm": avg_gnorm,
+        }
+        global_ckpt_hash = hash_object(aggregate_fingerprint)
         
         result = RoundResult(
             round_id=round_id,
             status="success" if valid_count > 0 else "failed",
             worker_submissions=len(submissions),
             valid_submissions=valid_count,
-            aggregation_method="simple_avg",
-            global_checkpoint_hash="0" * 64,  # Placeholder
+            aggregation_method="weighted_step_avg",
+            global_checkpoint_hash=global_ckpt_hash,
             global_checkpoint_url=f"s3://checkpoints/round_{round_id:04d}.pt",
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            metadata={"avg_loss": avg_loss},
+            metadata={
+                "avg_loss": avg_loss,
+                "avg_gradient_norm": avg_gnorm,
+                "total_weight_steps": total_weight,
+                "workers_included": len(worker_ids),
+            },
         )
         
         result_dict = result.to_dict()
@@ -185,6 +224,8 @@ class MasterCoordinator:
         print(f"[Master] Finalized round {round_id}")
         print(f"  Valid submissions: {valid_count}/{len(submissions)}")
         print(f"  Avg loss: {avg_loss:.4f}")
+        print(f"  Avg grad norm: {avg_gnorm:.4f}")
+        print(f"  Total weight steps: {total_weight}")
         print(f"  Result hash: {manifest_hash[:16]}...")
         
         return manifest
