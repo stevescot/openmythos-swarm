@@ -6,7 +6,7 @@ It is intentionally conservative: nothing is auto-installed unless explicitly re
 
 from __future__ import annotations
 
-import importlib.util
+import importlib
 import os
 import subprocess
 import sys
@@ -16,7 +16,9 @@ from typing import Dict, List
 def _missing_modules(module_to_package: Dict[str, str]) -> List[str]:
     missing: List[str] = []
     for module in module_to_package:
-        if importlib.util.find_spec(module) is None:
+        try:
+            importlib.import_module(module)
+        except Exception:
             missing.append(module)
     return missing
 

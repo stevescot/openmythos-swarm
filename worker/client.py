@@ -7,7 +7,6 @@ import shutil
 from pathlib import Path
 from typing import Optional, Dict
 import sys
-import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -96,6 +95,7 @@ class WorkerClient:
         delta_dir = self.local_dir / f"round_{self.current_round:04d}"
         delta_dir.mkdir(parents=True, exist_ok=True)
         delta_file = delta_dir / f"{self.worker_id}_delta.pt"
+        import torch
         delta_tensors = {
             "layer_0.weight": torch.ones(4, 4, dtype=torch.float32) * (0.001 * steps),
             "layer_0.bias": torch.ones(4, dtype=torch.float32) * (0.0001 * steps),

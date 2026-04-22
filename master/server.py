@@ -8,7 +8,6 @@ import random
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
 import sys
-import torch
 
 # Add parent for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -228,10 +227,12 @@ class MasterCoordinator:
         valid_count = 0
         worker_ids: List[str] = []
         worker_hashes: List[str] = []
-        merged_delta: Dict[str, torch.Tensor] = {}
+        merged_delta: Dict[str, object] = {}
         merged_tensor_count = 0
         tensor_contrib_count = 0
         rejected_count = 0
+
+        import torch
 
         for sub_file in submissions:
             try:
