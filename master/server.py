@@ -28,6 +28,7 @@ from common import (
     load_manifest_json,
 )
 from eth.receipt import receipt_payload, receipt_hash_hex
+from common.deps import ensure_dependencies, auto_install_enabled
 
 
 class MasterCoordinator:
@@ -600,7 +601,17 @@ def main() -> None:
     parser.add_argument("--export-round-receipts", type=int, default=None, help="Export anchor-ready receipts for round N")
     parser.add_argument("--export-out-dir", default=None, help="Optional output directory for exported receipts")
     parser.add_argument("--credits-per-step", type=int, default=1, help="Credits per accepted training step")
+    parser.add_argument("--auto-install-deps", action="store_true", help="Attempt to auto-install missing Python deps")
     args = parser.parse_args()
+
+    ensure_dependencies(
+        {
+            "cryptography": "cryptography>=41.0.0",
+            "torch": "torch>=2.0.0",
+            "numpy": "numpy>=1.26.0",
+        },
+        auto_install=auto_install_enabled(args.auto_install_deps),
+    )
 
     master = MasterCoordinator(state_dir=args.state_dir)
 

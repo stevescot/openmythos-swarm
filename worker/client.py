@@ -18,6 +18,7 @@ from common import (
     hash_checkpoint,
     hash_object,
 )
+from common.deps import ensure_dependencies, auto_install_enabled
 
 
 class WorkerClient:
@@ -233,7 +234,18 @@ def main() -> None:
     parser.add_argument("--round", type=int, default=1, help="Round ID to fetch")
     parser.add_argument("--steps", type=int, default=5, help="Local simulated steps")
     parser.add_argument("--print-public-key", action="store_true", help="Print worker public key and exit")
+    parser.add_argument("--auto-install-deps", action="store_true", help="Attempt to auto-install missing Python deps")
     args = parser.parse_args()
+
+    ensure_dependencies(
+        {
+            "cryptography": "cryptography>=41.0.0",
+            "torch": "torch>=2.0.0",
+            "numpy": "numpy>=1.26.0",
+            "psutil": "psutil>=5.9.0",
+        },
+        auto_install=auto_install_enabled(args.auto_install_deps),
+    )
 
     worker = WorkerClient(worker_id=args.worker_id, master_state_dir=args.master_state_dir)
     if args.print_public_key:

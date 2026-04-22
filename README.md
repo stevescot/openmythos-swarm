@@ -158,6 +158,16 @@ This will:
 - Run actual training (or simulated if testing)
 - Submit results to master
 
+If dependencies are missing on a contributor machine, you can opt-in to automatic install:
+
+```bash
+# one-shot
+openmythos-worker --worker-id "contributor_01" --auto-install-deps
+
+# or via environment variable
+OPENMYTHOS_AUTO_INSTALL_DEPS=1 openmythos-worker --worker-id "contributor_01"
+```
+
 **Supported devices:**
 - ✅ **Mac Studio** (M1/M2/M3 Ultra, 64GB+ RAM)
 - ✅ **NVIDIA GPU** (H100/A100/RTX, 40GB+ VRAM)

@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from common import Ed25519Key
+from common.deps import ensure_dependencies, auto_install_enabled
 
 
 def _key_fingerprint(pem: str) -> str:
@@ -71,7 +72,19 @@ def main() -> None:
         action="store_true",
         help="Print full public key PEM and exit (useful for sending to master operator).",
     )
+    parser.add_argument(
+        "--auto-install-deps",
+        action="store_true",
+        help="Attempt to auto-install missing Python deps",
+    )
     args = parser.parse_args()
+
+    ensure_dependencies(
+        {
+            "cryptography": "cryptography>=41.0.0",
+        },
+        auto_install=auto_install_enabled(args.auto_install_deps),
+    )
 
     # ------------------------------------------------------------------ key --
     keys_dir = Path(args.keys_dir)
