@@ -192,24 +192,32 @@ This runs in a loop:
 --config STRATEGY stabilization | production | mixed (default: mixed)
 ```
 
-### 3.5 Register Worker Identity (for contribution accreditation)
+### 3.5 Register Worker Identity (one-liner after `pip install`)
 
-Workers sign each submission with their local Ed25519 private key. To accredit a contributor identity,
-register their public key with the master allowlist:
+Workers sign every submission with a persistent Ed25519 private key.
+After `pip install openmythos-swarm`, register yourself in a single command:
 
 ```bash
-# On worker machine: print public key
-python -m worker.client --worker-id "alice" --print-public-key > alice_pub.pem
+# Local master (same machine or shared directory)
+openmythos-register --worker-id alice --master-state ./master_state
 
-# Copy alice_pub.pem to master machine, then register
+# With optional identity metadata (GitHub / email)
+openmythos-register --worker-id alice --master-state ./master_state \
+  --github alice-gh --email alice@example.com
+
+# Remote master — print your public key and send it to the master operator
+openmythos-register --worker-id alice --print-public-key
+
+# Master operator registers the key they received
 openmythos-master --state-dir ./master_state \
-   --register-worker-id "alice" \
-   --register-worker-pubkey-file ./alice_pub.pem
+  --register-worker-id alice \
+  --register-worker-pubkey-file alice_pub.pem
 
-# List registered contributors
+# List all registered contributors
 openmythos-master --state-dir ./master_state --list-workers
 ```
 
+Keys are stored in `~/.openmythos-swarm/keys/` and re-used across rounds.
 If an allowlist exists, submissions are accepted only when `worker_id` and public key match the registered record.
 
 ### 4. Run Integration Test
