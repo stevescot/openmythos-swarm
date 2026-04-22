@@ -27,6 +27,9 @@ from typing import Optional, Dict
 from dataclasses import asdict
 import argparse
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from common import Ed25519Key
+
 
 def detect_device() -> str:
     """Auto-detect compute device.
@@ -158,11 +161,24 @@ class WorkerContributor:
             raise ValueError(f"Unknown device: {self.device}")
         
         self.device_info = device_info
+
+        self.keys_dir = Path.home() / ".openmythos-swarm" / "keys"
+        self.keys_dir.mkdir(parents=True, exist_ok=True)
+        self.private_key_path = self.keys_dir / f"{self.worker_id}_private.pem"
+        self.worker_key = self._load_or_create_worker_key()
+        self.worker_public_key = self.worker_key.public_pem
         
         print(f"[Worker {worker_id}] Device: {self.device_info['name']}")
         print(f"  Min RAM: {self.device_info['min_ram_gb']} GB")
         print(f"  Min VRAM: {self.device_info['min_vram_gb']} GB")
         print(f"  Script: {self.device_info['script']}")
+
+    def _load_or_create_worker_key(self) -> Ed25519Key:
+        if self.private_key_path.exists():
+            return Ed25519Key.load_private_pem(str(self.private_key_path))
+        key = Ed25519Key()
+        key.save_private_pem(str(self.private_key_path))
+        return key
 
     def verify_requirements(self) -> bool:
         """Check if system meets minimum requirements."""
@@ -281,6 +297,7 @@ def main() -> None:
     parser.add_argument("--device", help="Force device (mps/cuda/rocm/cpu); auto-detect if unset")
     parser.add_argument("--show-specs", action="store_true", help="Show device specs and exit")
     parser.add_argument("--verify-only", action="store_true", help="Verify requirements and exit")
+    parser.add_argument("--print-public-key", action="store_true", help="Print worker public key and exit")
     
     args = parser.parse_args()
     
@@ -293,6 +310,10 @@ def main() -> None:
     
     if args.show_specs:
         worker.show_device_specs()
+        return
+
+    if args.print_public_key:
+        print(worker.worker_public_key)
         return
     
     if args.verify_only:

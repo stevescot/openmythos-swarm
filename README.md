@@ -150,6 +150,7 @@ openmythos-worker --worker-id "contributor_01" --show-specs
 This will:
 - Auto-detect your device (Apple Silicon MPS, NVIDIA CUDA, or AMD ROCm)
 - Load master's public key
+- Use a persistent worker Ed25519 key for signed attestations
 - Fetch round spec
 - Run actual training (or simulated if testing)
 - Submit results to master
@@ -190,6 +191,26 @@ This runs in a loop:
 --max-rounds N    Stop after N rounds (default: infinite)
 --config STRATEGY stabilization | production | mixed (default: mixed)
 ```
+
+### 3.5 Register Worker Identity (for contribution accreditation)
+
+Workers sign each submission with their local Ed25519 private key. To accredit a contributor identity,
+register their public key with the master allowlist:
+
+```bash
+# On worker machine: print public key
+python -m worker.client --worker-id "alice" --print-public-key > alice_pub.pem
+
+# Copy alice_pub.pem to master machine, then register
+openmythos-master --state-dir ./master_state \
+   --register-worker-id "alice" \
+   --register-worker-pubkey-file ./alice_pub.pem
+
+# List registered contributors
+openmythos-master --state-dir ./master_state --list-workers
+```
+
+If an allowlist exists, submissions are accepted only when `worker_id` and public key match the registered record.
 
 ### 4. Run Integration Test
 
@@ -269,10 +290,14 @@ ALL TESTS PASSED ✓
 
 4. **Workers submit**
    - Create WorkerSubmission with training stats
+   - Include signed attestation payload (`worker_id`, `round_id`, `dataset_manifest_hash`, `delta_hash`)
    - Submit to master's `submissions/` directory
 
 5. **Master aggregates**
    - Collect all valid submissions
+   - Verify worker attestation signature with worker public key
+   - Verify worker identity binding against optional allowlist registry
+   - Verify submitted delta file hash matches declared `delta_hash`
    - Load submitted tensor deltas (`.pt`) from workers
    - Compute weighted tensor merge (`steps_completed` as weights)
    - Save `aggregated_delta.pt` and hash it as canonical round artifact
@@ -291,7 +316,7 @@ ALL TESTS PASSED ✓
 
 ### What Master Verifies
 
-- Worker submissions: valid signatures, reasonable gradients
+- Worker submissions: valid worker signatures, identity binding, and delta hash integrity
 - Aggregation: outlier detection, norm clipping
 - Reproducibility: deterministic shard assignments via RNG seed
 

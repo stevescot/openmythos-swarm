@@ -32,6 +32,20 @@ def verify_signature(secret: str, payload_obj: Any, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
+def verify_signature_with_public_key(public_key_pem: str, payload_obj: Any, signature_b64: str) -> bool:
+    """Verify base64 Ed25519 signature using a PEM-encoded public key."""
+    if not HAS_CRYPTOGRAPHY:
+        return False
+    try:
+        public = serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
+        msg = canonical_json(payload_obj)
+        sig_bytes = base64.b64decode(signature_b64.encode("utf-8"))
+        public.verify(sig_bytes, msg)
+        return True
+    except Exception:
+        return False
+
+
 class Ed25519Key:
     """Ed25519 signing key pair."""
 

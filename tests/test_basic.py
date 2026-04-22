@@ -62,6 +62,11 @@ def test_basic_round():
             WorkerClient(f"mac_studio_{i:02d}", master_state_dir=str(master_state), local_dir=str(tmpdir / f"worker_{i}"))
             for i in range(3)
         ]
+
+        # Register workers with master allowlist for signature-bound identity checks
+        for w in workers:
+            master.register_worker(w.worker_id, w.worker_public_key, metadata={"test": True})
+
         print(f"[TEST] ✓ {len(workers)} workers initialized")
         
         # Workers fetch spec
@@ -95,6 +100,9 @@ def test_basic_round():
         assert result_manifest.payload["aggregation_method"] == "weighted_step_avg", "Unexpected aggregation method"
         assert result_manifest.payload["metadata"]["total_weight_steps"] > 0, "Expected positive weight steps"
         assert result_manifest.payload["metadata"]["workers_included"] == 3, "Expected all workers included"
+        assert result_manifest.payload["metadata"]["tensor_contributors"] == 3, "Expected all tensor contributors"
+        assert result_manifest.payload["metadata"]["rejected_submissions"] == 0, "Expected no rejected submissions"
+        assert result_manifest.payload["metadata"]["dataset_manifest_hash"], "Expected dataset manifest hash"
         assert result_manifest.payload["global_checkpoint_hash"] != "0" * 64, "Expected non-placeholder checkpoint hash"
         print("[TEST] ✓ Round aggregated successfully")
         

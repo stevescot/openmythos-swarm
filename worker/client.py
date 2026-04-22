@@ -6,16 +6,15 @@ import argparse
 import shutil
 from pathlib import Path
 from typing import Optional, Dict
-from dataclasses import asdict
 import sys
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from common import (
+    Ed25519Key,
     SignedManifest,
     load_manifest_json,
-    hash_object,
     hash_checkpoint,
 )
 
@@ -28,6 +27,12 @@ class WorkerClient:
         self.master_state_dir = Path(master_state_dir)
         self.local_dir = Path(local_dir)
         self.local_dir.mkdir(parents=True, exist_ok=True)
+
+        self.keys_dir = self.local_dir / "keys"
+        self.keys_dir.mkdir(parents=True, exist_ok=True)
+        self.private_key_path = self.keys_dir / f"{self.worker_id}_private.pem"
+        self.worker_key = self._load_or_create_worker_key()
+        self.worker_public_key = self.worker_key.public_pem
         
         self.current_round = None
         self.round_spec = None
@@ -42,6 +47,14 @@ class WorkerClient:
             print(f"[Worker {worker_id}] WARNING: Master public key not found")
         
         print(f"[Worker {worker_id}] Initialized")
+
+    def _load_or_create_worker_key(self) -> Ed25519Key:
+        """Load an existing worker signing key or create one."""
+        if self.private_key_path.exists():
+            return Ed25519Key.load_private_pem(str(self.private_key_path))
+        key = Ed25519Key()
+        key.save_private_pem(str(self.private_key_path))
+        return key
 
     def fetch_round_spec(self, round_id: int) -> Optional[SignedManifest]:
         """Fetch round specification from master."""
@@ -107,6 +120,17 @@ class WorkerClient:
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "metadata": {"loss_history": loss_values},
         }
+
+        attestation_payload = {
+            "round_id": self.current_round,
+            "worker_id": self.worker_id,
+            "delta_hash": delta_hash,
+            "dataset_manifest_hash": self.round_spec.get("metadata", {}).get("dataset_manifest_hash"),
+            "timestamp": result["timestamp"],
+        }
+        result["attestation_payload"] = attestation_payload
+        result["submission_signature"] = self.worker_key.sign(attestation_payload)
+        result["worker_public_key"] = self.worker_public_key
         
         print(f"[Worker {self.worker_id}] Training complete")
         print(f"  Final loss: {final_loss:.4f}")
@@ -162,9 +186,14 @@ def main() -> None:
     parser.add_argument("--master-state-dir", default="./test_master_state", help="Master state directory")
     parser.add_argument("--round", type=int, default=1, help="Round ID to fetch")
     parser.add_argument("--steps", type=int, default=5, help="Local simulated steps")
+    parser.add_argument("--print-public-key", action="store_true", help="Print worker public key and exit")
     args = parser.parse_args()
 
     worker = WorkerClient(worker_id=args.worker_id, master_state_dir=args.master_state_dir)
+    if args.print_public_key:
+        print(worker.worker_public_key)
+        return
+
     spec = worker.fetch_round_spec(round_id=args.round)
 
     if spec:

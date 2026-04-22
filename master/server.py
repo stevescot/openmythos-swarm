@@ -6,7 +6,6 @@ import threading
 import argparse
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
-from dataclasses import asdict
 import sys
 import torch
 
@@ -22,6 +21,7 @@ from common import (
     canonical_json,
     hash_object,
     hash_checkpoint,
+    verify_signature_with_public_key,
     create_round_spec,
     save_manifest_json,
     load_manifest_json,
@@ -46,11 +46,64 @@ class MasterCoordinator:
         self.rounds_dir.mkdir(exist_ok=True)
         self.submissions_dir = self.state_dir / "submissions"
         self.submissions_dir.mkdir(exist_ok=True)
+        self.datasets_dir = self.state_dir / "datasets"
+        self.datasets_dir.mkdir(exist_ok=True)
+        self.auth_dir = self.state_dir / "auth"
+        self.auth_dir.mkdir(exist_ok=True)
+        self.authorized_workers_file = self.auth_dir / "authorized_workers.json"
         
         self.current_round = 0
         self.key = self._load_or_create_key()
+        self.dataset_manifest_hash = self._ensure_dataset_manifest()
+        self.authorized_workers = self._load_authorized_workers()
         print(f"[Master] Initialized at {self.state_dir}")
         print(f"[Master] Public key (PEM):\n{self.key.public_pem[:100]}...")
+
+    def _ensure_dataset_manifest(self) -> str:
+        """Create a signed dataset manifest if missing and return its hash."""
+        manifest_path = self.datasets_dir / "dataset_manifest.json"
+        if manifest_path.exists():
+            existing = json.loads(manifest_path.read_text())
+            return str(existing.get("manifest_hash", hash_object(existing.get("payload", {}))))
+
+        payload = {
+            "manifest_version": 1,
+            "dataset": "HuggingFaceFW/fineweb-edu",
+            "default_shards": ["sample-10BT"],
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        signature = self.key.sign(payload)
+        manifest_hash = hash_object(payload)
+        manifest_obj = {
+            "payload": payload,
+            "signature": signature,
+            "signer_public_key": self.key.public_pem,
+            "manifest_hash": manifest_hash,
+        }
+        manifest_path.write_text(json.dumps(manifest_obj, indent=2))
+        return manifest_hash
+
+    def _load_authorized_workers(self) -> Dict[str, Dict]:
+        if not self.authorized_workers_file.exists():
+            return {}
+        try:
+            obj = json.loads(self.authorized_workers_file.read_text())
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+        return {}
+
+    def _save_authorized_workers(self) -> None:
+        self.authorized_workers_file.write_text(json.dumps(self.authorized_workers, indent=2))
+
+    def register_worker(self, worker_id: str, public_key_pem: str, metadata: Optional[Dict] = None) -> None:
+        self.authorized_workers[worker_id] = {
+            "public_key": public_key_pem,
+            "metadata": metadata or {},
+            "registered_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        self._save_authorized_workers()
 
     def _load_or_create_key(self) -> Ed25519Key:
         """Load existing key or generate new one."""
@@ -77,6 +130,9 @@ class MasterCoordinator:
         self.current_round += 1
         round_id = self.current_round
         
+        meta = dict(metadata or {})
+        meta.setdefault("dataset_manifest_hash", self.dataset_manifest_hash)
+
         spec = create_round_spec(
             round_id=round_id,
             version=version,
@@ -84,7 +140,7 @@ class MasterCoordinator:
             dataset_shard=dataset_shard,
             worker_count=worker_count,
             prior_checkpoint_hash=prior_checkpoint_hash,
-            metadata=metadata or {},
+            metadata=meta,
         )
         
         spec_dict = spec.to_dict()
@@ -143,6 +199,12 @@ class MasterCoordinator:
         
         submissions = list(submission_dir.glob("*.json"))
         print(f"[Master] Aggregating {len(submissions)} submissions for round {round_id}")
+
+        spec_file = self.rounds_dir / f"round_{round_id:04d}" / "spec.json"
+        expected_dataset_manifest_hash = None
+        if spec_file.exists():
+            spec_manifest = load_manifest_json(str(spec_file))
+            expected_dataset_manifest_hash = spec_manifest.payload.get("metadata", {}).get("dataset_manifest_hash")
         
         # Weighted aggregation over submitted worker metrics.
         # Weight each submission by steps_completed so longer local training
@@ -156,6 +218,7 @@ class MasterCoordinator:
         merged_delta: Dict[str, torch.Tensor] = {}
         merged_tensor_count = 0
         tensor_contrib_count = 0
+        rejected_count = 0
 
         for sub_file in submissions:
             try:
@@ -167,7 +230,45 @@ class MasterCoordinator:
                 delta_hash = str(data.get("delta_hash", ""))
 
                 if steps <= 0:
+                    rejected_count += 1
                     continue
+
+                # Cryptographic attestation verification
+                att_payload = data.get("attestation_payload")
+                att_sig = data.get("submission_signature")
+                att_pub = data.get("worker_public_key")
+                if not (att_payload and att_sig and att_pub):
+                    rejected_count += 1
+                    continue
+
+                if not verify_signature_with_public_key(str(att_pub), att_payload, str(att_sig)):
+                    rejected_count += 1
+                    continue
+
+                # Bind attestation to submission fields and round/dataset constraints
+                if int(att_payload.get("round_id", -1)) != round_id:
+                    rejected_count += 1
+                    continue
+                if str(att_payload.get("worker_id", "")) != worker_id:
+                    rejected_count += 1
+                    continue
+                if str(att_payload.get("delta_hash", "")) != delta_hash:
+                    rejected_count += 1
+                    continue
+                if expected_dataset_manifest_hash is not None and str(att_payload.get("dataset_manifest_hash", "")) != str(expected_dataset_manifest_hash):
+                    rejected_count += 1
+                    continue
+
+                # Optional worker allowlist enforcement.
+                # If allowlist exists, worker_id must be registered with matching public key.
+                if self.authorized_workers:
+                    reg = self.authorized_workers.get(worker_id)
+                    if not reg:
+                        rejected_count += 1
+                        continue
+                    if str(reg.get("public_key", "")).strip() != str(att_pub).strip():
+                        rejected_count += 1
+                        continue
 
                 weighted_loss_sum += loss * steps
                 weighted_gnorm_sum += gnorm * steps
@@ -184,6 +285,21 @@ class MasterCoordinator:
                     if not delta_path.is_absolute():
                         delta_path = submission_dir / delta_path
                     if delta_path.exists():
+                        # Verify file hash matches declared hash before use
+                        actual_hash = hash_checkpoint(delta_path.read_bytes())
+                        if actual_hash != delta_hash:
+                            rejected_count += 1
+                            # rollback metric contribution for this bad submission
+                            weighted_loss_sum -= loss * steps
+                            weighted_gnorm_sum -= gnorm * steps
+                            total_weight -= steps
+                            valid_count -= 1
+                            if worker_id in worker_ids:
+                                worker_ids.remove(worker_id)
+                            if delta_hash in worker_hashes:
+                                worker_hashes.remove(delta_hash)
+                            continue
+
                         loaded = torch.load(delta_path, map_location="cpu", weights_only=False)
                         if isinstance(loaded, dict) and "delta" in loaded and isinstance(loaded["delta"], dict):
                             delta_dict = loaded["delta"]
@@ -256,6 +372,8 @@ class MasterCoordinator:
                 "workers_included": len(worker_ids),
                 "tensor_contributors": tensor_contrib_count,
                 "merged_tensors": merged_tensor_count,
+                "rejected_submissions": rejected_count,
+                "dataset_manifest_hash": expected_dataset_manifest_hash or self.dataset_manifest_hash,
             },
         )
         
@@ -281,6 +399,7 @@ class MasterCoordinator:
         print(f"  Total weight steps: {total_weight}")
         print(f"  Tensor contributors: {tensor_contrib_count}")
         print(f"  Merged tensors: {merged_tensor_count}")
+        print(f"  Rejected submissions: {rejected_count}")
         print(f"  Result hash: {manifest_hash[:16]}...")
         
         return manifest
@@ -387,12 +506,25 @@ def main() -> None:
     parser.add_argument("--state-dir", default="./master_state", help="State directory")
     parser.add_argument("--status", action="store_true", help="Print coordinator status and exit")
     parser.add_argument("--publish-demo", action="store_true", help="Publish one demo round and exit")
+    parser.add_argument("--list-workers", action="store_true", help="List registered workers and exit")
+    parser.add_argument("--register-worker-id", default=None, help="Register worker id")
+    parser.add_argument("--register-worker-pubkey-file", default=None, help="Path to worker public key PEM")
     args = parser.parse_args()
 
     master = MasterCoordinator(state_dir=args.state_dir)
 
     if args.status:
         print(json.dumps(master.status(), indent=2))
+        return
+
+    if args.list_workers:
+        print(json.dumps(master.authorized_workers, indent=2))
+        return
+
+    if args.register_worker_id and args.register_worker_pubkey_file:
+        pub = Path(args.register_worker_pubkey_file).read_text()
+        master.register_worker(args.register_worker_id, pub, metadata={"source": "cli"})
+        print(f"Registered worker: {args.register_worker_id}")
         return
 
     if args.publish_demo:

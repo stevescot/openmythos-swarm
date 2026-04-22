@@ -2,7 +2,15 @@
 
 __version__ = "0.2.0"
 
-from .crypto import Ed25519Key, sign_payload, verify_signature, canonical_json, hash_object, hash_checkpoint
+from .crypto import (
+    Ed25519Key,
+    sign_payload,
+    verify_signature,
+    verify_signature_with_public_key,
+    canonical_json,
+    hash_object,
+    hash_checkpoint,
+)
 from .manifest import (
     RoundSpec,
     WorkerSubmission,
@@ -18,6 +26,7 @@ __all__ = [
     "Ed25519Key",
     "sign_payload",
     "verify_signature",
+    "verify_signature_with_public_key",
     "canonical_json",
     "hash_object",
     "hash_checkpoint",
