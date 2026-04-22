@@ -2,10 +2,13 @@
 
 import json
 import time
+import argparse
+import shutil
 from pathlib import Path
 from typing import Optional, Dict
 from dataclasses import asdict
 import sys
+import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -13,6 +16,7 @@ from common import (
     SignedManifest,
     load_manifest_json,
     hash_object,
+    hash_checkpoint,
 )
 
 
@@ -73,13 +77,24 @@ class WorkerClient:
         final_loss = loss_values[-1]
         gradient_norm = 25.0
         
-        # Simulate delta file
+        # Simulate tensor delta file
         delta_dir = self.local_dir / f"round_{self.current_round:04d}"
         delta_dir.mkdir(parents=True, exist_ok=True)
-        delta_file = delta_dir / f"{self.worker_id}_delta.bin"
-        delta_file.write_bytes(b"mock_delta_" + self.worker_id.encode() + b"_" + str(self.current_round).encode())
-        
-        delta_hash = hash_object({"worker": self.worker_id, "round": self.current_round})
+        delta_file = delta_dir / f"{self.worker_id}_delta.pt"
+        delta_tensors = {
+            "layer_0.weight": torch.ones(4, 4, dtype=torch.float32) * (0.001 * steps),
+            "layer_0.bias": torch.ones(4, dtype=torch.float32) * (0.0001 * steps),
+        }
+        torch.save(
+            {
+                "worker_id": self.worker_id,
+                "round_id": self.current_round,
+                "delta": delta_tensors,
+            },
+            delta_file,
+        )
+
+        delta_hash = hash_checkpoint(delta_file.read_bytes())
         
         result = {
             "worker_id": self.worker_id,
@@ -104,6 +119,7 @@ class WorkerClient:
         """Submit training results to master."""
         try:
             round_id = training_result["round_id"]
+            training_result = dict(training_result)
             
             # Save submission locally
             sub_dir = self.local_dir / f"round_{round_id:04d}"
@@ -114,6 +130,14 @@ class WorkerClient:
             # Also copy to master submissions directory
             master_sub_dir = self.master_state_dir / f"submissions/round_{round_id:04d}"
             master_sub_dir.mkdir(parents=True, exist_ok=True)
+
+            # Copy tensor delta into master submission dir for tensor-level aggregation
+            delta_src = Path(str(training_result.get("delta_file", "")))
+            if delta_src.exists():
+                delta_dst = master_sub_dir / f"{self.worker_id}_delta.pt"
+                shutil.copy2(delta_src, delta_dst)
+                training_result["delta_file"] = str(delta_dst)
+
             master_sub_file = master_sub_dir / f"{self.worker_id}.json"
             master_sub_file.write_text(json.dumps(training_result, indent=2))
             
@@ -132,20 +156,24 @@ class WorkerClient:
         }
 
 
-if __name__ == "__main__":
-    # Example usage
-    worker = WorkerClient(worker_id="mac_studio_01", master_state_dir="./test_master_state")
-    
-    # Fetch round spec
-    spec = worker.fetch_round_spec(round_id=1)
-    
+def main() -> None:
+    parser = argparse.ArgumentParser(description="OpenMythos Swarm basic worker client")
+    parser.add_argument("--worker-id", default="mac_studio_01", help="Worker identifier")
+    parser.add_argument("--master-state-dir", default="./test_master_state", help="Master state directory")
+    parser.add_argument("--round", type=int, default=1, help="Round ID to fetch")
+    parser.add_argument("--steps", type=int, default=5, help="Local simulated steps")
+    args = parser.parse_args()
+
+    worker = WorkerClient(worker_id=args.worker_id, master_state_dir=args.master_state_dir)
+    spec = worker.fetch_round_spec(round_id=args.round)
+
     if spec:
-        # Train
-        result = worker.train_locally(steps=5)
-        
-        # Submit
+        result = worker.train_locally(steps=args.steps)
         worker.submit_results(result)
-        
         print(f"\nWorker status: {worker.status()}")
     else:
         print("Could not fetch round spec")
+
+
+if __name__ == "__main__":
+    main()

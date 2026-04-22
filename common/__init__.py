@@ -1,8 +1,8 @@
-"""OpenMythos Swarm: Federated training on Mac Studios."""
+"""OpenMythos Swarm: Federated training on Mac, NVIDIA, and AMD workers."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-from .crypto import Ed25519Key, sign_payload, verify_signature, canonical_json, hash_object
+from .crypto import Ed25519Key, sign_payload, verify_signature, canonical_json, hash_object, hash_checkpoint
 from .manifest import (
     RoundSpec,
     WorkerSubmission,
@@ -20,6 +20,7 @@ __all__ = [
     "verify_signature",
     "canonical_json",
     "hash_object",
+    "hash_checkpoint",
     "RoundSpec",
     "WorkerSubmission",
     "RoundResult",

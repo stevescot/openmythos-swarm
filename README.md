@@ -88,9 +88,8 @@ The swarm auto-detects your device and uses the optimal backend:
 ### Prerequisites
 
 - Python 3.10+
-- `cryptography` library (for Ed25519)
 
-### Installation
+### Installation (pip)
 
 1. Clone the repo:
    ```bash
@@ -98,17 +97,29 @@ The swarm auto-detects your device and uses the optimal backend:
    cd openmythos-swarm
    ```
 
-2. Install dependencies:
+2. Install with pip (recommended):
    ```bash
-   pip install -r requirements.txt
+   pip install .
    ```
+
+   For editable development install:
+   ```bash
+   pip install -e .
+   ```
+
+3. Optional: CLI commands are installed automatically:
+   - `openmythos-master`
+   - `openmythos-scheduler`
+   - `openmythos-worker`
+
+   > On Windows, these may install under `%APPDATA%\Python\Python313\Scripts`. Add that directory to `PATH` if commands are not found.
 
 ## Quick Start
 
 ### 1. Initialize Master
 
 ```bash
-python master/server.py
+openmythos-master --state-dir ./master_state --publish-demo
 ```
 
 This will:
@@ -124,16 +135,16 @@ In another terminal:
 
 ```bash
 # Mac Studio (auto-detects MPS)
-python worker/contrib.py --worker-id "mac_studio_01"
+openmythos-worker --worker-id "mac_studio_01"
 
 # NVIDIA GPU (auto-detects CUDA)
-python worker/contrib.py --worker-id "gpu_node_01"
+openmythos-worker --worker-id "gpu_node_01"
 
 # AMD ROCm GPU (auto-detects ROCm)
-python worker/contrib.py --worker-id "amd_node_01"
+openmythos-worker --worker-id "amd_node_01"
 
 # Check your hardware specs first
-python worker/contrib.py --worker-id "contributor_01" --show-specs
+openmythos-worker --worker-id "contributor_01" --show-specs
 ```
 
 This will:
@@ -155,13 +166,13 @@ For production, run the auto-scheduler to publish rounds automatically:
 
 ```bash
 # Stabilization: 5 rounds × 5M tokens each
-python master/scheduler.py --config stabilization --max-rounds 5
+openmythos-scheduler --config stabilization --max-rounds 5
 
 # Production: 100 rounds × 100M tokens each  
-python master/scheduler.py --config production --max-rounds 100
+openmythos-scheduler --config production --max-rounds 100
 
 # Mixed (recommended): stabilization then production
-python master/scheduler.py --config mixed --workers 5 --interval 3600 --submission-wait 1800
+openmythos-scheduler --config mixed --workers 5 --interval 3600 --submission-wait 1800
 ```
 
 This runs in a loop:
@@ -220,7 +231,13 @@ FEDERATED TRAINING INTEGRATION TEST
 [TEST] ✓ All workers submitted results
 
 [TEST] Master aggregating round...
-[Master] Aggregated round 1: 3 valid submissions
+[Master] Finalized round 1
+  Valid submissions: 3/3
+  Avg loss: 9.6000
+  Avg grad norm: 25.0000
+  Total weight steps: 15
+  Tensor contributors: 3
+  Merged tensors: 2
 [TEST] ✓ Round aggregated successfully
 
 [TEST] Verifying manifest structure...
@@ -256,8 +273,9 @@ ALL TESTS PASSED ✓
 
 5. **Master aggregates**
    - Collect all valid submissions
-   - Compute weighted aggregation across worker metrics (`steps_completed` as weights)
-   - Derive deterministic aggregate checkpoint fingerprint hash
+   - Load submitted tensor deltas (`.pt`) from workers
+   - Compute weighted tensor merge (`steps_completed` as weights)
+   - Save `aggregated_delta.pt` and hash it as canonical round artifact
    - Publish signed RoundResult
 
 6. **Next round**
@@ -293,10 +311,10 @@ Workers submit via published manifests to shared storage (GitHub, S3).
 
 ```bash
 # Master (runs continuously)
-python master/server.py --output-dir s3://my-bucket/rounds --poll-interval 300
+openmythos-scheduler --state-dir ./master_state --config mixed --workers 5
 
-# Worker (runs on volunteer Mac)
-python worker/client.py --master-url https://raw.githubusercontent.com/stevescot/openmythos-swarm/main/rounds
+# Worker (runs on volunteer node)
+openmythos-worker --worker-id contributor_01 --master-url ./master_state
 ```
 
 ### Option 2: Hierarchical (Future)

@@ -53,9 +53,9 @@ def get_config_mixed(round_num: int) -> TrainingConfig:
         return get_config_production(round_num)
 
 
-if __name__ == "__main__":
+def main() -> None:
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Auto-scheduler for federated training")
     parser.add_argument(
         "--state-dir",
@@ -132,3 +132,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n[Scheduler] Interrupted by user")
         sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

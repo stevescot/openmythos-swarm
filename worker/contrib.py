@@ -273,7 +273,7 @@ class WorkerContributor:
         print("=" * 80 + "\n")
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(description="Federated training worker with auto-backend selection")
     parser.add_argument("--worker-id", default="contributor_001", help="Worker identifier")
     parser.add_argument("--master-url", default="./master_state", help="Master state dir or URL")
@@ -293,13 +293,12 @@ if __name__ == "__main__":
     
     if args.show_specs:
         worker.show_device_specs()
-        sys.exit(0)
+        return
     
     if args.verify_only:
         if worker.verify_requirements():
-            sys.exit(0)
-        else:
-            sys.exit(1)
+            return
+        sys.exit(1)
     
     # Verify requirements
     if not worker.verify_requirements():
@@ -307,4 +306,8 @@ if __name__ == "__main__":
         sys.exit(1)
     
     print("[Worker] Ready to contribute!")
-    print(f"Run: python worker/contrib.py --worker-id {args.worker_id}")
+    print(f"Run: openmythos-worker --worker-id {args.worker_id}")
+
+
+if __name__ == "__main__":
+    main()

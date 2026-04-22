@@ -3,10 +3,12 @@
 import json
 import time
 import threading
+import argparse
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
 from dataclasses import asdict
 import sys
+import torch
 
 # Add parent for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -19,6 +21,7 @@ from common import (
     SignedManifest,
     canonical_json,
     hash_object,
+    hash_checkpoint,
     create_round_spec,
     save_manifest_json,
     load_manifest_json,
@@ -150,6 +153,9 @@ class MasterCoordinator:
         valid_count = 0
         worker_ids: List[str] = []
         worker_hashes: List[str] = []
+        merged_delta: Dict[str, torch.Tensor] = {}
+        merged_tensor_count = 0
+        tensor_contrib_count = 0
 
         for sub_file in submissions:
             try:
@@ -170,23 +176,69 @@ class MasterCoordinator:
                 worker_ids.append(worker_id)
                 if delta_hash:
                     worker_hashes.append(delta_hash)
+
+                # Tensor-level merge path (FedAvg-style on submitted deltas)
+                delta_file = data.get("delta_file")
+                if delta_file:
+                    delta_path = Path(str(delta_file))
+                    if not delta_path.is_absolute():
+                        delta_path = submission_dir / delta_path
+                    if delta_path.exists():
+                        loaded = torch.load(delta_path, map_location="cpu", weights_only=False)
+                        if isinstance(loaded, dict) and "delta" in loaded and isinstance(loaded["delta"], dict):
+                            delta_dict = loaded["delta"]
+                        elif isinstance(loaded, dict):
+                            delta_dict = loaded
+                        else:
+                            delta_dict = None
+
+                        if isinstance(delta_dict, dict):
+                            for k, v in delta_dict.items():
+                                if isinstance(v, torch.Tensor):
+                                    v = v.detach().to("cpu")
+                                    if k not in merged_delta:
+                                        merged_delta[k] = v * steps
+                                    else:
+                                        merged_delta[k] += v * steps
+                            tensor_contrib_count += 1
             except Exception:
                 continue
 
         avg_loss = weighted_loss_sum / max(total_weight, 1)
         avg_gnorm = weighted_gnorm_sum / max(total_weight, 1)
 
-        # Deterministic checkpoint hash placeholder derived from submitted deltas.
-        # (Next step for full tensor FedAvg: load delta tensors and merge weights.)
-        aggregate_fingerprint = {
-            "round_id": round_id,
-            "worker_ids": sorted(worker_ids),
-            "delta_hashes": sorted(worker_hashes),
-            "total_weight": total_weight,
-            "avg_loss": avg_loss,
-            "avg_gnorm": avg_gnorm,
-        }
-        global_ckpt_hash = hash_object(aggregate_fingerprint)
+        # Finalize tensor merge by dividing weighted sums by total weight.
+        round_dir = self.rounds_dir / f"round_{round_id:04d}"
+        round_dir.mkdir(exist_ok=True)
+        aggregated_delta_path = round_dir / "aggregated_delta.pt"
+
+        if total_weight > 0 and merged_delta:
+            for k in list(merged_delta.keys()):
+                merged_delta[k] = merged_delta[k] / total_weight
+            merged_tensor_count = len(merged_delta)
+            torch.save(
+                {
+                    "round_id": round_id,
+                    "aggregation_method": "weighted_step_avg",
+                    "total_weight_steps": total_weight,
+                    "delta": merged_delta,
+                },
+                aggregated_delta_path,
+            )
+            global_ckpt_hash = hash_checkpoint(aggregated_delta_path.read_bytes())
+            global_ckpt_url = str(aggregated_delta_path)
+        else:
+            # Fallback deterministic fingerprint if no tensor deltas were provided.
+            aggregate_fingerprint = {
+                "round_id": round_id,
+                "worker_ids": sorted(worker_ids),
+                "delta_hashes": sorted(worker_hashes),
+                "total_weight": total_weight,
+                "avg_loss": avg_loss,
+                "avg_gnorm": avg_gnorm,
+            }
+            global_ckpt_hash = hash_object(aggregate_fingerprint)
+            global_ckpt_url = f"s3://checkpoints/round_{round_id:04d}.pt"
         
         result = RoundResult(
             round_id=round_id,
@@ -195,13 +247,15 @@ class MasterCoordinator:
             valid_submissions=valid_count,
             aggregation_method="weighted_step_avg",
             global_checkpoint_hash=global_ckpt_hash,
-            global_checkpoint_url=f"s3://checkpoints/round_{round_id:04d}.pt",
+            global_checkpoint_url=global_ckpt_url,
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             metadata={
                 "avg_loss": avg_loss,
                 "avg_gradient_norm": avg_gnorm,
                 "total_weight_steps": total_weight,
                 "workers_included": len(worker_ids),
+                "tensor_contributors": tensor_contrib_count,
+                "merged_tensors": merged_tensor_count,
             },
         )
         
@@ -217,7 +271,6 @@ class MasterCoordinator:
         )
         
         # Save
-        round_dir = self.rounds_dir / f"round_{round_id:04d}"
         result_file = round_dir / "result.json"
         save_manifest_json(manifest, str(result_file))
         
@@ -226,6 +279,8 @@ class MasterCoordinator:
         print(f"  Avg loss: {avg_loss:.4f}")
         print(f"  Avg grad norm: {avg_gnorm:.4f}")
         print(f"  Total weight steps: {total_weight}")
+        print(f"  Tensor contributors: {tensor_contrib_count}")
+        print(f"  Merged tensors: {merged_tensor_count}")
         print(f"  Result hash: {manifest_hash[:16]}...")
         
         return manifest
@@ -327,27 +382,39 @@ class MasterCoordinator:
         return thread
 
 
+def main() -> None:
+    parser = argparse.ArgumentParser(description="OpenMythos Swarm master coordinator")
+    parser.add_argument("--state-dir", default="./master_state", help="State directory")
+    parser.add_argument("--status", action="store_true", help="Print coordinator status and exit")
+    parser.add_argument("--publish-demo", action="store_true", help="Publish one demo round and exit")
+    args = parser.parse_args()
+
+    master = MasterCoordinator(state_dir=args.state_dir)
+
+    if args.status:
+        print(json.dumps(master.status(), indent=2))
+        return
+
+    if args.publish_demo:
+        config = TrainingConfig(
+            seq_len=1024,
+            micro_batch=1,
+            grad_accum=4,
+            train_loops=8,
+            learning_rate=2e-4,
+            weight_decay=0.1,
+            target_tokens=5_000_000,
+        )
+        manifest = master.publish_round(
+            version="10b-mps-v1",
+            config=config,
+            dataset_shard="fineweb-edu/sample-10BT",
+            worker_count=1,
+        )
+        print(f"\nPublished manifest:\n{json.dumps(manifest.payload, indent=2)}\n")
+    else:
+        print("Master initialized. Use --publish-demo to publish a round or run scheduler.")
+
+
 if __name__ == "__main__":
-    # Example usage
-    master = MasterCoordinator(state_dir="./test_master_state")
-    
-    # Publish a round
-    config = TrainingConfig(
-        seq_len=1024,
-        micro_batch=1,
-        grad_accum=4,
-        train_loops=8,
-        learning_rate=2e-4,
-        weight_decay=0.1,
-        target_tokens=5_000_000,
-    )
-    
-    manifest = master.publish_round(
-        version="10b-mps-v1",
-        config=config,
-        dataset_shard="fineweb-edu/sample-10BT",
-        worker_count=1,
-    )
-    print(f"\nPublished manifest:\n{json.dumps(manifest.payload, indent=2)}\n")
-    
-    print(f"Master status: {master.status()}")
+    main()
