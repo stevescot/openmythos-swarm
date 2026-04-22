@@ -87,7 +87,7 @@ The swarm auto-detects your device and uses the optimal backend:
 
 1. Clone the repo:
    ```bash
-   git clone https://github.com/your-org/openmythos-swarm.git
+   git clone https://github.com/stevescot/openmythos-swarm.git
    cd openmythos-swarm
    ```
 
@@ -285,7 +285,7 @@ Workers submit via published manifests to shared storage (GitHub, S3).
 python master/server.py --output-dir s3://my-bucket/rounds --poll-interval 300
 
 # Worker (runs on volunteer Mac)
-python worker/client.py --master-url https://raw.githubusercontent.com/you/openmythos-swarm/main/rounds
+python worker/client.py --master-url https://raw.githubusercontent.com/stevescot/openmythos-swarm/main/rounds
 ```
 
 ### Option 2: Hierarchical (Future)
