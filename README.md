@@ -106,7 +106,38 @@ This will:
 - Simulate training (5 steps)
 - Submit results to master
 
-### 3. Run Integration Test
+### 3. Run Auto-Scheduler (Continuous)
+
+For production, run the auto-scheduler to publish rounds automatically:
+
+```bash
+# Stabilization: 5 rounds × 5M tokens each
+python master/scheduler.py --config stabilization --max-rounds 5
+
+# Production: 100 rounds × 100M tokens each  
+python master/scheduler.py --config production --max-rounds 100
+
+# Mixed (recommended): stabilization then production
+python master/scheduler.py --config mixed --workers 5 --interval 3600 --submission-wait 1800
+```
+
+This runs in a loop:
+1. Publishes a new round spec
+2. Waits for worker submissions (30 min default)
+3. Aggregates results into next round
+4. Repeats
+
+**Args:**
+```
+--state-dir       Master state directory (default: ./master_state)
+--workers N       Expected workers per round (default: 3)
+--interval SECS   Total time per round (default: 3600 = 1hr)
+--submission-wait SECS  Time to wait for submissions (default: 1800 = 30min)
+--max-rounds N    Stop after N rounds (default: infinite)
+--config STRATEGY stabilization | production | mixed (default: mixed)
+```
+
+### 4. Run Integration Test
 
 ```bash
 python tests/test_basic.py

@@ -2,8 +2,9 @@
 
 import json
 import time
+import threading
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable
 from dataclasses import asdict
 import sys
 
@@ -195,6 +196,94 @@ class MasterCoordinator:
             "state_dir": str(self.state_dir),
             "public_key": self.key.public_pem[:100] + "...",
         }
+
+    def start_scheduler(
+        self,
+        config_fn: Callable[[int], TrainingConfig],
+        worker_count: int = 3,
+        interval_seconds: int = 3600,
+        max_rounds: Optional[int] = None,
+        submission_wait_seconds: int = 1800,
+    ) -> threading.Thread:
+        """Start automatic round publishing in background thread.
+        
+        Args:
+            config_fn: Function(round_num) -> TrainingConfig for that round
+            worker_count: Expected number of workers per round
+            interval_seconds: Time between round start and next round (default 1hr)
+            max_rounds: Max rounds to run (None = infinite)
+            submission_wait_seconds: Time to wait for submissions (default 30min)
+        
+        Returns:
+            threading.Thread running the scheduler (daemon=False, can join)
+        
+        Example:
+            def get_config(round_num):
+                if round_num <= 5:
+                    return TrainingConfig(
+                        seq_len=1024, train_loops=8, target_tokens=5_000_000
+                    )  # Stabilization
+                else:
+                    return TrainingConfig(
+                        seq_len=4096, train_loops=24, target_tokens=500_000_000
+                    )  # Production
+            
+            thread = master.start_scheduler(
+                config_fn=get_config,
+                worker_count=3,
+                interval_seconds=3600,
+                max_rounds=100,
+            )
+            thread.join()  # Run forever (or until max_rounds)
+        """
+        
+        def _scheduler_loop():
+            round_num = 1
+            prior_hash = "0" * 64
+            
+            while max_rounds is None or round_num <= max_rounds:
+                try:
+                    # Get config for this round
+                    config = config_fn(round_num)
+                    
+                    # Publish round
+                    manifest = self.publish_round(
+                        version=f"10b-mps-v{round_num}",
+                        config=config,
+                        dataset_shard=f"fineweb-edu/sample-round{round_num}",
+                        worker_count=worker_count,
+                        prior_checkpoint_hash=prior_hash,
+                        metadata={"scheduler_round": round_num},
+                    )
+                    
+                    print(f"[Scheduler] Published round {round_num}, waiting {submission_wait_seconds}s for submissions...")
+                    
+                    # Wait for submissions
+                    time.sleep(submission_wait_seconds)
+                    
+                    # Aggregate
+                    try:
+                        result = self.finalize_round(round_num)
+                        prior_hash = result.payload.get("global_checkpoint_hash", "0" * 64)
+                        print(f"[Scheduler] Finalized round {round_num} → next in {interval_seconds}s")
+                    except Exception as e:
+                        print(f"[Scheduler] Error finalizing round {round_num}: {e}")
+                        prior_hash = "0" * 64  # Reset on error
+                    
+                    # Wait for interval (total time from round start)
+                    time.sleep(max(0, interval_seconds - submission_wait_seconds))
+                    round_num += 1
+                    
+                except Exception as e:
+                    print(f"[Scheduler] ERROR in round loop: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    time.sleep(60)  # Retry after 1 min on error
+        
+        thread = threading.Thread(target=_scheduler_loop, daemon=False, name="MasterScheduler")
+        thread.start()
+        print(f"[Scheduler] Started background thread (max_rounds={max_rounds}, interval={interval_seconds}s)")
+        return thread
 
 
 if __name__ == "__main__":
