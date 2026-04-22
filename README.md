@@ -1,6 +1,8 @@
 # OpenMythos Swarm — Federated Training on Mac Studios
 
-Decentralized, volunteer-driven training for the OpenMythos 10B language model on Mac Silicon.
+Decentralized, volunteer-driven training for the [OpenMythos](https://github.com/open-mythos/openmythos) 10B language model on Mac Silicon.
+
+> **Note:** This is a complementary project to [OpenMythos](https://github.com/open-mythos/openmythos), designed to enable distributed collaborative training on Mac Studios. It is not a fork of OpenMythos itself, but rather a federated training coordinator that integrates with OpenMythos model code.
 
 ## Architecture
 
@@ -300,6 +302,14 @@ MIT
 - [FedAdam: A Robust Adaptive Aggregation Algorithm for Federated Learning](https://arxiv.org/abs/2003.00295) — Reddi et al.
 - [Byzantine-Robust Distributed Learning via Gradient Compression](https://arxiv.org/abs/1902.06932) — Bernstein et al.
 - [Flower: A Federated Learning Framework](https://flower.ai/) — Open source FL framework
+
+## Related Projects
+
+- **[OpenMythos](https://github.com/open-mythos/openmythos)** — The 10B language model being trained collaboratively by this swarm
+- **[Flower](https://flower.ai/)** — Production federated learning framework (consider migrating to for scale)
+- **[NVFlare](https://github.com/NVIDIA/NVFlare)** — Enterprise federated learning platform
+
+This project is a volunteer-driven **federated training coordinator** for OpenMythos, not a fork. It depends on OpenMythos model code and tokenizer.
 
 ## Contact
 
