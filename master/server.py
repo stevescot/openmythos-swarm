@@ -510,6 +510,8 @@ class MasterCoordinator:
         max_rounds: Optional[int] = None,
         submission_wait_seconds: int = 1800,
         dataset_shard_fn: Optional[Callable[[int], str]] = None,
+        round_metadata_fn: Optional[Callable[[int], Dict]] = None,
+        version_prefix: str = "10b-mps",
     ) -> threading.Thread:
         """Start automatic round publishing in background thread.
         
@@ -521,6 +523,8 @@ class MasterCoordinator:
             submission_wait_seconds: Time to wait for submissions (default 30min)
             dataset_shard_fn: Optional function(round_num) -> dataset shard identifier.
                 If omitted, uses default fineweb shard naming.
+            round_metadata_fn: Optional function(round_num) -> extra metadata for the round.
+            version_prefix: Prefix used to build round version string.
         
         Returns:
             threading.Thread running the scheduler (daemon=False, can join)
@@ -560,16 +564,19 @@ class MasterCoordinator:
                         if dataset_shard_fn is not None
                         else f"fineweb-edu/sample-round{round_num}"
                     )
+                    round_meta = {
+                        "scheduler_round": round_num,
+                        "dataset_shard": dataset_shard,
+                    }
+                    if round_metadata_fn is not None:
+                        round_meta.update(round_metadata_fn(round_num) or {})
                     manifest = self.publish_round(
-                        version=f"10b-mps-v{round_num}",
+                        version=f"{version_prefix}-v{round_num}",
                         config=config,
                         dataset_shard=dataset_shard,
                         worker_count=worker_count,
                         prior_checkpoint_hash=prior_hash,
-                        metadata={
-                            "scheduler_round": round_num,
-                            "dataset_shard": dataset_shard,
-                        },
+                        metadata=round_meta,
                     )
                     
                     print(f"[Scheduler] Published round {round_num}, waiting {submission_wait_seconds}s for submissions...")

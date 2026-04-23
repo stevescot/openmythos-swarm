@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Worker client with automatic backend selection (Mac MPS or NVIDIA CUDA).
+Worker client with automatic backend selection and model-plan aware trainer wiring.
 
-For Mac Studios: Auto-detects MPS, uses 10b_apple_silicon.py
-For NVIDIA GPUs: Auto-detects CUDA, uses 10b_cross_platform.py
-For CPU: Falls back to CPU (slow, testing only)
+Current upstream OpenMythos trainer support:
+- Mac Studios: `training/10b_apple_silicon.py` for the 10B path
+- Smaller proof plans (e.g. 1B) can be expressed as scheduler model plans,
+  though upstream trainer coverage may be experimental or custom
+- CPU remains testing only
 
 Run:
     python worker/contrib.py --worker-id "mac_studio_01" --master-url ./master_state
@@ -30,6 +32,7 @@ import argparse
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from common import Ed25519Key
 from common.deps import ensure_dependencies, auto_install_enabled
+from data.model_plans import get_model_plan, resolve_plan_script
 
 
 def detect_device() -> str:
@@ -65,7 +68,7 @@ def get_device_info(device: str) -> Dict:
             "recommended_ram_gb": 256,
             "min_vram_gb": 0,  # Unified memory
             "supported_models": ["10b"],
-            "script": "10b_apple_silicon.py",
+            "script": "training/10b_apple_silicon.py",
             "seq_len_default": 4096,
             "batch_default": 2,
             "grad_accum_default": 16,
@@ -84,7 +87,7 @@ def get_device_info(device: str) -> Dict:
             "recommended_ram_gb": 128,
             "min_vram_gb": 40,
             "supported_models": ["10b"],
-            "script": "10b_cross_platform.py",
+            "script": "training/10b_cross_platform.py",
             "seq_len_default": 8192,
             "batch_default": 8,
             "grad_accum_default": 4,
@@ -104,7 +107,7 @@ def get_device_info(device: str) -> Dict:
             "recommended_ram_gb": 128,
             "min_vram_gb": 40,
             "supported_models": ["10b"],
-            "script": "10b_cross_platform.py",
+            "script": "training/10b_cross_platform.py",
             "seq_len_default": 8192,
             "batch_default": 8,
             "grad_accum_default": 4,
@@ -123,7 +126,7 @@ def get_device_info(device: str) -> Dict:
             "recommended_ram_gb": 64,
             "min_vram_gb": 0,
             "supported_models": ["10b (very slow)"],
-            "script": "10b_cross_platform.py",
+            "script": "training/10b_cross_platform.py",
             "seq_len_default": 512,
             "batch_default": 1,
             "grad_accum_default": 1,
@@ -144,7 +147,7 @@ class WorkerContributor:
         self,
         worker_id: str,
         master_url: str = "./master_state",
-        training_repo: str = "../openmythos-10b-apple-silicon",
+        training_repo: str = "../OpenMythos",
         device: Optional[str] = None,
         force_device: bool = False,
     ):
@@ -212,33 +215,110 @@ class WorkerContributor:
         print(f"  ✓ System meets requirements\n")
         return True
 
-    def get_training_script(self) -> Path:
-        """Get path to training script for this device."""
-        script_name = self.device_info["script"]
+    def get_training_script(self, model_plan_id: Optional[str] = None) -> Path:
+        """Get path to training script for this device/model plan."""
+        script_name = None
+        if model_plan_id:
+            try:
+                script_name = resolve_plan_script(model_plan_id, self.device)
+            except KeyError:
+                script_name = None
+        if not script_name:
+            script_name = self.device_info["script"]
         script_path = self.training_repo / script_name
         
         if not script_path.exists():
             raise FileNotFoundError(
                 f"Training script not found: {script_path}\n"
-                f"Make sure openmythos-10b-apple-silicon is cloned to: {self.training_repo}"
+                f"Make sure OpenMythos is cloned to: {self.training_repo}"
             )
         
         return script_path
 
-    def train_round(self, round_id: int, config: Dict) -> Dict:
-        """Run training for a round."""
-        print(f"\n[Worker {self.worker_id}] Starting training for round {round_id}")
-        print(f"  Config: seq_len={config.get('seq_len')}, loops={config.get('train_loops')}")
-        
-        script = self.get_training_script()
+    @staticmethod
+    def parse_dataset_shard(dataset_shard: Optional[str]) -> Dict[str, Optional[str]]:
+        """Parse round dataset identifier into dataset + subset fields.
+
+        Supports forms like:
+        - HuggingFaceFW/fineweb-edu:sample-10BT
+        - fineweb-edu/sample-10BT (legacy shorthand)
+        - c4:en
+        """
+        if not dataset_shard:
+            return {"dataset": None, "subset": None}
+
+        shard = str(dataset_shard).strip()
+        if ":" in shard:
+            dataset, subset = shard.split(":", 1)
+            return {"dataset": dataset.strip(), "subset": subset.strip()}
+
+        if "/" in shard and shard.startswith("fineweb-edu/"):
+            return {"dataset": "HuggingFaceFW/fineweb-edu", "subset": shard.split("/", 1)[1].strip()}
+
+        return {"dataset": shard, "subset": None}
+
+    def build_trainer_env(
+        self,
+        config: Dict,
+        dataset_shard: Optional[str] = None,
+        model_plan_id: Optional[str] = None,
+        round_metadata: Optional[Dict] = None,
+    ) -> Dict[str, str]:
         env = os.environ.copy()
         env["MYTHOS_SEQ_LEN"] = str(config.get("seq_len", self.device_info["seq_len_default"]))
         env["MYTHOS_MICRO_BATCH"] = str(config.get("micro_batch", self.device_info["batch_default"]))
         env["MYTHOS_GRAD_ACCUM"] = str(config.get("grad_accum", self.device_info["grad_accum_default"]))
         env["MYTHOS_TRAIN_LOOPS"] = str(config.get("train_loops", 8))
-        # cross-platform trainer uses torch.device("cuda") for both CUDA and ROCm
+        env["MYTHOS_TARGET_TOKENS"] = str(config.get("target_tokens", 0))
+        env["MYTHOS_LR"] = str(config.get("learning_rate", 2e-4))
+        env["MYTHOS_WEIGHT_DECAY"] = str(config.get("weight_decay", 0.1))
         env["MYTHOS_DEVICE"] = "cuda" if self.device in {"cuda", "rocm"} else self.device
         env["MYTHOS_BACKEND"] = self.device
+
+        if dataset_shard:
+            parsed = self.parse_dataset_shard(dataset_shard)
+            env["MYTHOS_DATASET_SHARD"] = str(dataset_shard)
+            if parsed["dataset"]:
+                env["MYTHOS_DATASET"] = parsed["dataset"]
+            if parsed["subset"]:
+                env["MYTHOS_DATASET_SUBSET"] = parsed["subset"]
+
+        if model_plan_id:
+            plan = get_model_plan(model_plan_id)
+            env["MYTHOS_MODEL_PLAN"] = plan["id"]
+            env["MYTHOS_MODEL_VARIANT"] = plan["model_variant"]
+            env["MYTHOS_MODEL_SIZE"] = plan["model_size"]
+
+        if round_metadata:
+            if round_metadata.get("default_dataset_subset") and "MYTHOS_DATASET_SUBSET" not in env:
+                env["MYTHOS_DATASET_SUBSET"] = str(round_metadata["default_dataset_subset"])
+        return env
+
+    def train_round(
+        self,
+        round_id: int,
+        config: Dict,
+        dataset_shard: Optional[str] = None,
+        round_metadata: Optional[Dict] = None,
+    ) -> Dict:
+        """Run training for a round."""
+        print(f"\n[Worker {self.worker_id}] Starting training for round {round_id}")
+        print(f"  Config: seq_len={config.get('seq_len')}, loops={config.get('train_loops')}")
+        if dataset_shard:
+            print(f"  Dataset shard: {dataset_shard}")
+        model_plan_id = None
+        if round_metadata:
+            model_plan_id = round_metadata.get("model_plan")
+            if model_plan_id:
+                print(f"  Model plan: {model_plan_id}")
+        
+        script = self.get_training_script(model_plan_id=model_plan_id)
+        env = self.build_trainer_env(
+            config=config,
+            dataset_shard=dataset_shard,
+            model_plan_id=model_plan_id,
+            round_metadata=round_metadata,
+        )
         
         try:
             result = subprocess.run(
@@ -261,6 +341,8 @@ class WorkerContributor:
                 "round_id": round_id,
                 "device": self.device,
                 "script": str(script),
+                "dataset_shard": dataset_shard,
+                "model_plan": model_plan_id,
                 "status": "success",
             }
         
@@ -294,12 +376,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Federated training worker with auto-backend selection")
     parser.add_argument("--worker-id", default="contributor_001", help="Worker identifier")
     parser.add_argument("--master-url", default="./master_state", help="Master state dir or URL")
-    parser.add_argument("--training-repo", default="../openmythos-10b-apple-silicon", help="Path to training repo")
+    parser.add_argument("--training-repo", default="../OpenMythos", help="Path to OpenMythos training repo")
     parser.add_argument("--device", help="Force device (mps/cuda/rocm/cpu); auto-detect if unset")
     parser.add_argument("--show-specs", action="store_true", help="Show device specs and exit")
     parser.add_argument("--verify-only", action="store_true", help="Verify requirements and exit")
     parser.add_argument("--print-public-key", action="store_true", help="Print worker public key and exit")
     parser.add_argument("--auto-install-deps", action="store_true", help="Attempt to auto-install missing Python deps")
+    parser.add_argument("--dataset-shard", default=None, help="Dataset shard identifier for direct trainer invocation")
+    parser.add_argument("--model-plan", default="10b-fineweb", help="Model plan id for direct trainer invocation")
     
     args = parser.parse_args()
 
@@ -337,6 +421,16 @@ def main() -> None:
     if not worker.verify_requirements():
         print("[Worker] System does not meet requirements")
         sys.exit(1)
+
+    if args.dataset_shard:
+        result = worker.train_round(
+            round_id=1,
+            config={},
+            dataset_shard=args.dataset_shard,
+            round_metadata={"model_plan": args.model_plan},
+        )
+        print(json.dumps(result, indent=2))
+        return
     
     print("[Worker] Ready to contribute!")
     print(f"Run: openmythos-worker --worker-id {args.worker_id}")

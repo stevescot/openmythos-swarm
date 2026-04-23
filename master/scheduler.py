@@ -20,6 +20,11 @@ from data.dataset_ledger import (
     ShardStatus,
     build_ledger_from_profiles,
 )
+from data.model_plans import (
+    MODEL_PLANS,
+    get_model_plan,
+    print_model_plans,
+)
 
 
 DATASET_PROFILES: Dict[str, List[str]] = {
@@ -212,6 +217,12 @@ def main() -> None:
         help="Configuration strategy (default: mixed = stabilization then production)"
     )
     parser.add_argument(
+        "--model-plan",
+        choices=sorted(MODEL_PLANS.keys()),
+        default="10b-fineweb",
+        help="Model training plan for rounds (default: 10b-fineweb)",
+    )
+    parser.add_argument(
         "--dataset-profile",
         choices=dataset_profile_choices,
         default="fineweb",
@@ -227,11 +238,19 @@ def main() -> None:
         action="store_true",
         help="Print available open dataset profiles and exit",
     )
+    parser.add_argument(
+        "--list-model-plans",
+        action="store_true",
+        help="Print available model plans and exit",
+    )
     
     args = parser.parse_args()
 
     if args.list_datasets:
         print_dataset_profiles(dataset_profiles, repo_root)
+        return
+    if args.list_model_plans:
+        print_model_plans()
         return
     
     # Select config strategy
@@ -243,17 +262,20 @@ def main() -> None:
     }
     config_fn = config_map[args.config]
 
+    selected_plan = get_model_plan(args.model_plan)
+
     if args.dataset_shards:
         shard_list = [x.strip() for x in args.dataset_shards.split(",") if x.strip()]
         if not shard_list:
             raise ValueError("--dataset-shards was provided but no valid shard values were parsed")
     else:
-        if args.dataset_profile not in dataset_profiles:
+        dataset_profile = args.dataset_profile or selected_plan["default_dataset_profile"]
+        if dataset_profile not in dataset_profiles:
             raise ValueError(
-                f"Dataset profile '{args.dataset_profile}' is unavailable. "
+                f"Dataset profile '{dataset_profile}' is unavailable. "
                 "If using code-open-safe, ensure data/approved_code_shards.json exists."
             )
-        shard_list = dataset_profiles[args.dataset_profile]
+        shard_list = dataset_profiles[dataset_profile]
 
     # ------------------------------------------------------------------
     # Dataset ledger — build/load, seed from profiles, print summary
@@ -289,6 +311,17 @@ def main() -> None:
 
     dataset_shard_fn = ledger_shard_fn
 
+    def round_metadata_fn(round_num: int) -> Dict[str, Any]:
+        return {
+            "model_plan": selected_plan["id"],
+            "model_variant": selected_plan["model_variant"],
+            "model_size": selected_plan["model_size"],
+            "trainer_type": selected_plan["trainer_type"],
+            "default_dataset_subset": selected_plan.get("default_dataset_subset"),
+        }
+
+    version_prefix = selected_plan["version_prefix"]
+
     # ------------------------------------------------------------------
     # Startup banner
     # ------------------------------------------------------------------
@@ -301,6 +334,7 @@ def main() -> None:
     print(f"Submission wait: {args.submission_wait}s")
     print(f"Max rounds: {args.max_rounds or 'infinite'}")
     print(f"Config strategy: {args.config}")
+    print(f"Model plan: {selected_plan['id']} [{selected_plan['status']}]")
     print(f"Dataset profile: {args.dataset_profile} (ledger-aware)")
     print(f"Dataset shards ({len(shard_list)}):")
     for idx, shard in enumerate(shard_list, start=1):
@@ -335,6 +369,8 @@ def main() -> None:
         max_rounds=args.max_rounds,
         submission_wait_seconds=args.submission_wait,
         dataset_shard_fn=dataset_shard_fn,
+        round_metadata_fn=round_metadata_fn,
+        version_prefix=version_prefix,
     )
     
     # Run until user interrupts

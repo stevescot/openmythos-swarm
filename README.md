@@ -39,80 +39,6 @@ Decentralized, volunteer-driven training for the [OpenMythos](https://github.com
    - Combiner nodes can aggregate N workers, then submit to master
    - Reduces network traffic and improves robustness
 
-## Project Concept: How Contributions Are Tracked and Rewarded
-
-This project uses a **two-layer model** for contribution accountability and reward distribution.
-
-### Layer 1 — Off-chain verified work receipts (live now)
-
-Every training contribution is cryptographically bound:
-
-- Each worker has a persistent **Ed25519 keypair** identifying them across rounds.
-- Submissions include a signed attestation with `worker_id`, `round_id`, `dataset_manifest_hash`, `delta_hash`, and a **ZKPoT-lite challenge receipt** (`work_receipt_hash`) that proves the worker processed the correct data.
-- Master verifies signature and identity binding before accepting any submission.
-- After round finalization, the coordinator exports a **deterministic receipt file** per accepted contributor:
-  - `receipt_payload` — canonical JSON of the work claim
-  - `receipt_hash` — SHA-256 of the payload, used for on-chain anchoring
-
-This off-chain receipt is the foundation for provable work claims.
-
-### Layer 2 — On-chain anchoring and reward claiming (zk-eth branch)
-
-When ready for on-chain accounting:
-
-1. Coordinator anchors receipt hashes to `ZkPotContributionRegistry` (Solidity contract).
-2. Contributor calls `claim(...)` on-chain — **they pay their own gas**.
-3. Tokens are minted/transferred to their ETH address.
-
-**The same ETH address that submits the claim (and pays gas) is the contributor identity.**
-
-For security, claims are EIP-712 signed with replay protection:
-
-| Field | Purpose |
-|---|---|
-| `recipient_address` | Where tokens are sent |
-| `amount` | Credits/tokens earned |
-| `nonce` | Prevents replay |
-| `expiry` | Claim window |
-| `chain_id` | Chain binding |
-| `contract_address` | Contract binding |
-
-### Operating without a token (tokenless mode)
-
-You can run the full pipeline without deploying an ERC-20 token:
-- Export receipts + anchor payloads from finalized rounds
-- Store verified contribution records off-chain
-- Deploy token and replay/issue rewards later from those records
-
-**This means contributors can begin earning verifiable credit immediately, before a token exists.**
-
-### Reward lifecycle (end-to-end)
-
-```
-Worker trains locally
-        │
-Worker submits signed attestation
-        │
-Master verifies: signature + identity + delta hash + receipt hash
-        │
-Round finalized → receipt files exported
-        │
-Anchor payload prepared (openmythos-eth-anchor)
-        │
-(Optional) Anchor tx broadcast on testnet/mainnet
-        │
-Contributor calls claim() → tokens minted to their ETH address
-```
-
-### Gas cost
-
-| Phase | Cost |
-|---|---|
-| Testnet (rehearsal) | Free (faucet gas) |
-| L2 mainnet deploy (Base/Arbitrum/OP) | $2–$50 one-time |
-| Claim tx per contributor | Contributor-paid (their gas) |
-| Token issuance/distribution | Minimal ongoing gas at L2 rates |
-
 ## Project Structure
 
 ```
@@ -222,6 +148,12 @@ openmythos-worker --worker-id "amd_node_01"
 
 # Check your hardware specs first
 openmythos-worker --worker-id "contributor_01" --show-specs
+
+# Direct trainer invocation with explicit dataset shard + model plan
+openmythos-worker --worker-id "mac_studio_01" \
+   --training-repo ../OpenMythos \
+   --model-plan 10b-fineweb \
+   --dataset-shard HuggingFaceFW/fineweb-edu:sample-10BT
 ```
 
 This will:
@@ -229,6 +161,7 @@ This will:
 - Load master's public key
 - Use a persistent worker Ed25519 key for signed attestations
 - Fetch round spec
+- Propagate scheduler-selected dataset shard into trainer env (`MYTHOS_DATASET`, `MYTHOS_DATASET_SUBSET`, `MYTHOS_DATASET_SHARD`)
 - Run actual training (or simulated if testing)
 - Submit results to master
 
@@ -262,14 +195,11 @@ openmythos-scheduler --config production --max-rounds 100
 # Mixed (recommended): stabilization then production
 openmythos-scheduler --config mixed --workers 5 --interval 3600 --submission-wait 1800
 
-# Micro rounds on real open data (hours-scale)
-openmythos-scheduler --config micro-real --dataset-profile fineweb --workers 3 --interval 7200 --submission-wait 3600
+# 10B upstream training plan on FineWeb-Edu
+openmythos-scheduler --config micro-real --model-plan 10b-fineweb --dataset-profile fineweb --workers 1
 
-# Print built-in open dataset profiles
-openmythos-scheduler --list-datasets
-
-# Use manifest-backed code profile (license allowlist filtered)
-openmythos-scheduler --config micro-real --dataset-profile code-open-safe --workers 3
+# Print built-in model plans
+openmythos-scheduler --list-model-plans
 ```
 
 This runs in a loop:
@@ -278,21 +208,15 @@ This runs in a loop:
 3. Aggregates results into next round
 4. Repeats
 
-Dataset handoff behavior:
-- Scheduler rotates through shards in the selected dataset profile each round.
-- The selected shard is written into `dataset_shard` in the round spec.
-- Workers fetch and train on that shard for the round.
+Model-plan behavior:
+- Scheduler stamps each round with a `model_plan`, `model_variant`, and `model_size`
+- Worker uses that metadata to resolve the correct trainer path for the device
+- For the 10B Apple Silicon path, the upstream OpenMythos trainer consumes the propagated `MYTHOS_DATASET_SUBSET`
 
-Built-in profiles:
-- `fineweb` (default): FineWeb-Edu shards
-- `open-mix`: mixed web-scale open corpora
-- `instruction`: instruction/QA style open datasets
-- `code-open-safe`: curated code shards from `data/approved_code_shards.json`
-
-License governance for code profile:
-- allowed licenses are defined in `data/licenses_allowlist.json`
-- approved code shards are listed in `data/approved_code_shards.json`
-- scheduler only rotates shards listed in the approved manifest
+Available model plans:
+- `1b-fineweb` — experimental smaller-model plan for proofs and custom runners
+- `10b-fineweb` — current best-supported upstream training path
+- `100b-blueprint` — orchestration blueprint until upstream trainer support exists
 
 **Args:**
 ```
@@ -302,78 +226,12 @@ License governance for code profile:
 --submission-wait SECS  Time to wait for submissions (default: 1800 = 30min)
 --max-rounds N    Stop after N rounds (default: infinite)
 --config STRATEGY stabilization | production | mixed | micro-real (default: mixed)
+--model-plan ID   1b-fineweb | 10b-fineweb | 100b-blueprint (default: 10b-fineweb)
 --dataset-profile NAME  fineweb | open-mix | instruction | code-open-safe (default: fineweb)
 --dataset-shards CSV    Optional custom shard list override (comma-separated)
 --list-datasets         Print available open dataset profiles and exit
+--list-model-plans      Print available model plans and exit
 ```
-
-### 3.5 Micro-rounds: completing a step in hours, not days
-
-By default a round is large (100M–500M tokens). For contributors on a normal home connection or consumer GPU, a **micro-round** configuration breaks training into 2–4 hour chunks. Multiple contributors each complete one micro-round and the master chains them together.
-
-#### Bandwidth per round — what actually moves
-
-| Artifact | Size | Direction | Notes |
-|---|---|---|---|
-| Round spec (JSON) | ~2 KB | ↓ download | Tiny — config + hashes |
-| Dataset shard | 10–100 MB | ↓ download | Only once per shard, re-used across rounds |
-| Gradient delta (`.pt`) | **~40 GB** (full, fp32) | ↑ upload | 10B model × 4 bytes/param |
-| Gradient delta (compressed/quantized) | **~5–10 GB** | ↑ upload | bf16 or int8 delta compression |
-| Round result manifest | ~2 KB | ↓ download | Signed result hash |
-
-**On a 100 Mbps home upload:** a full fp32 delta takes ~55 minutes. With bf16 compression: ~7–14 minutes.
-
-#### Practical micro-round sizes
-
-| Mode | `target_tokens` | `train_loops` | Estimated time (Mac M3 Ultra) | Upload size (bf16 delta) |
-|---|---|---|---|---|
-| **Quick smoke test** | 500K | 2 | 10–20 min | ~5 GB |
-| **Micro-round** | 5M | 4 | 1–2 hrs | ~5 GB |
-| **Standard round** | 50M | 8 | 4–8 hrs | ~5 GB |
-| **Production round** | 500M | 24 | 2–3 days | ~5 GB |
-
-> **Note:** Delta size is determined by model size (10B params), not by `target_tokens`. Compression is the key lever for upload time. Longer rounds just train more steps before the upload happens.
-
-#### Recommended micro-round config for home contributors
-
-```python
-# ~1–2 hour round, ~5 GB upload (bf16 delta)
-TrainingConfig(
-    seq_len=512,          # shorter sequences = more steps per GB
-    micro_batch=1,
-    grad_accum=4,
-    train_loops=4,        # 4 inner loops per round
-    learning_rate=2e-4,
-    weight_decay=0.1,
-    target_tokens=5_000_000,  # 5M tokens per round
-)
-```
-
-Schedule this with:
-
-```bash
-openmythos-scheduler \
-  --config stabilization \
-  --workers 3 \
-  --interval 7200 \
-  --submission-wait 3600 \
-  --max-rounds 20
-```
-
-Each round closes every 2 hours. 20 rounds × 5M tokens = 100M tokens total — a meaningful contribution on a standard broadband connection.
-
-#### How chaining works
-
-```
-Round 1 (contributor A, 5M tokens)
-   └→ aggregated_delta_1.pt + checkpoint_hash_1
-Round 2 (contributor B, 5M tokens) ← prior_checkpoint_hash = checkpoint_hash_1
-   └→ aggregated_delta_2.pt + checkpoint_hash_2
-Round 3 (contributor A+C, 5M tokens) ← prior_checkpoint_hash = checkpoint_hash_2
-   └→ ...
-```
-
-Contributors do **not** need to hold the full model checkpoint locally — only their delta for that round. The master chains them via hashes.
 
 ### 3.5 Register Worker Identity (one-liner after `pip install`)
 
