@@ -1,0 +1,79 @@
+{
+  "created_at": "2026-04-23T00:00:00Z",
+  "source": "User-provided research brief",
+  "themes": [
+    {
+      "id": "elastic_recursion",
+      "name": "Elastic Depth + Multi-Resolution Recursion",
+      "goal": "Stabilize and scale recurrent-depth inference under variable compute budgets.",
+      "integration_targets": ["master/scheduler.py", "data/dataset_ledger.py", "worker/contrib.py"],
+      "papers": [
+        {"title": "LoopFormer", "year": 2026, "query": "LoopFormer elastic depth shortcut consistency"},
+        {"title": "SpiralFormer", "year": 2026, "query": "SpiralFormer multi-resolution recursion MeSH"},
+        {"title": "Loop, Think, & Generalize: Implicit Reasoning in Recurrent-Depth Transformers", "year": 2026, "query": "Loop Think and Generalize recurrent-depth transformers"}
+      ]
+    },
+    {
+      "id": "parcae_stability",
+      "name": "Parcae Recurrent-Depth Scaling Laws",
+      "goal": "Constrain unstable recurrence dynamics and derive FLOP-optimal loop/token tradeoffs.",
+      "integration_targets": ["master/scheduler.py", "data/model_plans.py"],
+      "papers": [
+        {"title": "Parcae scaling laws", "year": 2026, "query": "Parcae scaling laws recurrent depth transformer"},
+        {"title": "Saunshi et al. recurrent transformer approximation", "year": 2025, "query": "recurrent transformer approximation capabilities p-hop composition"}
+      ]
+    },
+    {
+      "id": "moe_routing",
+      "name": "Expert-Choice MoE + Timestep-Adaptive Capacity",
+      "goal": "Improve throughput and convergence with deterministic expert loads.",
+      "integration_targets": ["worker/contrib.py", "data/model_plans.py"],
+      "papers": [
+        {"title": "Expert-Choice Routing for Diffusion Language Models", "year": 2026, "query": "expert-choice routing diffusion language models"},
+        {"title": "Timestep-Dependent Expert Capacity", "year": 2026, "query": "timestep dependent expert capacity mask ratio linear reverse"}
+      ]
+    },
+    {
+      "id": "test_time_compute",
+      "name": "Constrained Test-Time Compute Allocation",
+      "goal": "Allocate loops/search budget per prompt under global compute constraints.",
+      "integration_targets": ["master/scheduler.py", "data/dataset_ledger.py"],
+      "papers": [
+        {"title": "Adaptive Test-Time Compute Allocation for Reasoning LLMs via Constrained Policy Optimization", "year": 2026, "query": "Adaptive Test-Time Compute Allocation Reasoning LLMs Constrained Policy Optimization"},
+        {"title": "More Test-Time Compute Can Hurt: Overestimation Bias in LLM Beam Search", "year": 2026, "query": "More Test-Time Compute Can Hurt Overestimation Bias Beam Search"},
+        {"title": "Learning When to Plan: Efficiently Allocating Test-Time Compute for LLM Agents", "year": 2026, "query": "Learning When to Plan test-time compute LLM agents"}
+      ]
+    },
+    {
+      "id": "attention_quantization",
+      "name": "Attention + Quantization Efficiency",
+      "goal": "Reduce memory and bandwidth bottlenecks while preserving reasoning quality.",
+      "integration_targets": ["worker/contrib.py", "master/server.py"],
+      "papers": [
+        {"title": "Mixture-of-Depths Attention (MoDA)", "year": 2026, "query": "Mixture-of-Depths Attention MoDA"},
+        {"title": "BinaryAttention", "year": 2026, "query": "BinaryAttention 1-bit query key attention"},
+        {"title": "BitNet b1.58", "year": 2024, "query": "BitNet b1.58"},
+        {"title": "TurboQuant", "year": 2026, "query": "TurboQuant 3-bit KV cache"}
+      ]
+    },
+    {
+      "id": "multimodal_ssm",
+      "name": "Multimodal Recurrence + SSM Boundaries",
+      "goal": "Combine recurrent text reasoning with efficient temporal processing for video/agentic contexts.",
+      "integration_targets": ["data/model_plans.py"],
+      "papers": [
+        {"title": "TRecViT: A Recurrent Video Transformer", "year": 2026, "query": "TRecViT recurrent video transformer"},
+        {"title": "Mamba-2 / S6 associative recall analysis", "year": 2026, "query": "Mamba-2 S6 associative recall long-form generation limits"}
+      ]
+    },
+    {
+      "id": "latent_diffusion_reasoning",
+      "name": "Latent Diffusion Reasoning",
+      "goal": "Enable iterative sequence revision beyond left-to-right autoregression.",
+      "integration_targets": ["data/model_plans.py", "master/scheduler.py"],
+      "papers": [
+        {"title": "LaDiR (Latent Diffusion Reasoner)", "year": 2025, "query": "LaDiR latent diffusion reasoner"}
+      ]
+    }
+  ]
+}

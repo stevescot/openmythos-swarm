@@ -556,6 +556,28 @@ Areas to help:
 - Performance optimization
 - Documentation
 
+## Research ingestion pipeline (papers + development themes)
+
+The repository includes a research ingestion workspace under `papers/` to convert literature into actionable engineering themes.
+
+Artifacts:
+- `papers/themes.json` — curated paper list grouped by architecture themes
+- `papers/download_papers.py` — resolves titles against arXiv and downloads PDFs
+- `papers/index.json` — resolved paper metadata (title/id/abstract/path)
+- `papers/build_development_themes.py` — processes resolved papers into implementation themes
+- `papers/development_themes.json` — machine-readable roadmap themes mapped to integration targets
+
+Run:
+
+```bash
+python papers/download_papers.py
+python papers/build_development_themes.py
+```
+
+Notes:
+- Downloaded PDFs are stored in `papers/downloads/` and ignored by git.
+- `papers/development_themes.json` is intended for planning/prioritization (human-in-the-loop), not automatic code mutation.
+
 ## License
 
 MIT
