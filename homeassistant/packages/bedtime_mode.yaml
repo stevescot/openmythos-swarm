@@ -1,0 +1,139 @@
+# ===================================================================
+# Bedtime Mode Package
+# Triggered by: Kitchen TV turning off (after 20:00)
+# Actions:
+#   - Turn off kitchen lamp (light.product_name) if on
+#   - Reduce non-bedroom zones to 16°C
+#   - Ensure bedroom zones set to 18°C in heat mode
+#
+# NOTE (2026-09-29): tado zones are now driven with the native
+#   tado.set_climate_timer service instead of climate.set_temperature.
+#   climate.set_temperature maps to a tado MANUAL overlay with NO end time,
+#   which silently killed the tado schedule until someone cleared it by
+#   hand - this was the cause of "kitchen keeps being set to manual".
+#   set_climate_timer writes a MANUAL overlay that is terminated by a
+#   TIMER (input_number.bedtime_overlay_hours, default 10h), so the tado
+#   schedule resumes on its own in the morning.
+#
+# NOTE (2026-10-04): the UFH block was REMOVED from this automation.
+#   climate.kitchen_front and climate.smart_thermostat (plus
+#   master_bathroom_2 / kids_bathroom_2 / toilet_downstairs) are Tuya
+#   underfloor-heating thermostats, NOT tado. On those devices the
+#   `temperature` field maps to the `temp_set` datapoint, which forces the
+#   thermostat into MANUAL and permanently overrides the programme saved
+#   on the device - that is what left the floors stuck "manual on, full
+#   temperature". Bedtime mode no longer touches them at all.
+#
+#   UFH arming is owned exclusively by the cheap-electric package:
+#     cheap -> expensive : every UFH thermostat is switched OFF
+#     cheap confirmed    : every UFH thermostat is set to heat_cool, which
+#                        on these devices only flips the power switch
+#                        (switch=true) and lets the on-device saved
+#                        programme run. No temperature is ever pushed.
+#
+#   Rule for anyone editing packages: never call climate.set_temperature
+#   on a *_2 / kitchen_front / smart_thermostat UFH entity.
+# ===================================================================
+
+# Input number to configure bedroom/non-bedroom setpoints
+input_number:
+  bedtime_bedroom_setpoint:
+    name: Bedtime Bedroom Setpoint
+    min: 10
+    max: 22
+    step: 0.5
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer-plus
+    initial: 18
+
+  bedtime_nonbedroom_setpoint:
+    name: Bedtime Non-Bedroom Setpoint
+    min: 10
+    max: 20
+    step: 0.5
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer-minus
+    initial: 16
+
+  bedtime_overlay_hours:
+    name: Bedtime Overlay Duration
+    min: 2
+    max: 14
+    step: 0.5
+    unit_of_measurement: "h"
+    icon: mdi:timer-outline
+    initial: 10
+
+automation:
+  - id: bedtime_mode_on_tv_off
+    alias: "Bedtime Mode - Kitchen TV off"
+    description: >
+      When Kitchen TV turns off after 20:00, turn off kitchen lamp if on,
+      reduce non-bedroom heating, and ensure bedroom heating is active.
+      tado zones use a NEXT_TIME_BLOCK overlay so the tado schedule resumes
+      on its own instead of being stuck in MANUAL forever.
+    triggers:
+      - platform: state
+        entity_id: media_player.kitchen_tv
+        to: "off"
+    conditions:
+      - condition: time
+        after: "20:00:00"
+    actions:
+      # ── Kitchen lamp off (Tuya) ──────────────────────────────────
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: light.product_name
+                state: "on"
+            sequence:
+              - service: light.turn_off
+                target:
+                  entity_id: light.product_name
+        default: []
+
+      # ── Non-bedroom tado zones → bedtime setpoint, expiring overlay ──
+      - service: tado.set_climate_timer
+        target:
+          entity_id:
+            - climate.kitchen
+            - climate.living_room
+            - climate.hall
+            - climate.study
+            - climate.loft
+        data:
+          temperature: "{{ states('input_number.bedtime_nonbedroom_setpoint') | float }}"
+          time_period: "{{ (states('input_number.bedtime_overlay_hours') | float * 3600) | timestamp_custom('%H:%M:%S', false) }}"
+          requested_overlay: "MANUAL"
+
+      # ── UFH (Tuya underfloor heating) is deliberately NOT touched here ──
+      # See header: set_temperature on these devices forces MANUAL and
+      # destroys the saved on-device programme. The cheap-electric package
+      # owns UFH arming (heat_cool on cheap, off on expensive).
+
+      # ── Bedroom tado zones → bedroom setpoint, expiring overlay ───
+      - service: tado.set_climate_timer
+        target:
+          entity_id:
+            - climate.bedroom
+            - climate.lucas_s_room
+            - climate.dressing_room
+        data:
+          temperature: "{{ states('input_number.bedtime_bedroom_setpoint') | float }}"
+          time_period: "{{ (states('input_number.bedtime_overlay_hours') | float(10) * 3600) | timestamp_custom('%H:%M:%S', false) }}"
+          requested_overlay: "MANUAL"
+
+      # ── Bathroom tado zones → setpoint, expiring overlay ──────────
+      - service: tado.set_climate_timer
+        target:
+          entity_id:
+            - climate.master_bathroom
+            - climate.kids_bathroom
+        data:
+          temperature: "{{ states('input_number.bedtime_bedroom_setpoint') | float }}"
+          time_period: "{{ (states('input_number.bedtime_overlay_hours') | float(10) * 3600) | timestamp_custom('%H:%M:%S', false) }}"
+          requested_overlay: "MANUAL"
+
+    mode: single
+
+
