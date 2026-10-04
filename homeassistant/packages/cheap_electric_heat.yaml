@@ -21,6 +21,17 @@
 #   programme saved ON THE DEVICE. HA deliberately does NOT push a target
 #   temperature: set_temperature overrides the user's on-device schedule.
 #
+#   Space-heating arming gate (2026-10-04 fix): the swap branch trusts
+#   binary_sensor.cheap_electricity_window_active as the authoritative
+#   "is this cheap?" signal. It no longer re-reads the raw household tariff
+#   (sensor.eon_next_current_rate_2) and vetoes on rate <= threshold. That
+#   raw sensor reports the expensive day rate (e.g. 23.93p Peak) even while
+#   E.ON Drive Smart is dispatching genuinely cheap energy into the car, so
+#   the old check wrongly blocked space heating during real cheap windows.
+#   The window sensor already folds in EV charge dispatch, off-peak tariff,
+#   boost and schedule fallback; the gate now just adds outdoor-temp cutoff
+#   and heating-demand checks on top of it.
+#
 # The ElectriQ dehumidifier failed and has been removed from the Tuya app;
 # every Home Assistant reference to it has been removed from this package.
 #
@@ -952,8 +963,6 @@ automation:
           - conditions: >
               {% set outdoor = states('sensor.outdoor_temperature') | float(99) %}
               {% set cutoff = states('input_number.cheap_heat_outdoor_temp_cutoff') | float(16) %}
-              {% set rate = states('sensor.eon_next_current_rate_2') | float(999) %}
-              {% set threshold = states('input_number.eon_cheap_rate_threshold') | float(7) %}
               {% set k_heat_raw = states('sensor.kitchen_heating') %}
               {% set m_heat_raw = states('sensor.master_bathroom_heating') %}
               {% set b_heat_raw = states('sensor.kids_bathroom_heating') %}
@@ -965,7 +974,7 @@ automation:
               {% set mode_fallback_active = states('climate.kitchen') != 'off' or states('climate.master_bathroom') != 'off' or states('climate.kids_bathroom') != 'off' %}
               {{ is_state('input_boolean.cheap_heat_allow_space_heating_swap', 'on')
                  and is_state('input_boolean.cheap_heat_space_heating_active', 'off')
-                 and rate <= threshold
+                 and is_state('binary_sensor.cheap_electricity_window_active', 'on')
                  and outdoor <= cutoff
                  and (demand_active or (not demand_known and mode_fallback_active)) }}
             sequence:
