@@ -44,6 +44,24 @@ AUTH_COOLDOWN_SECONDS = 300
 DEFAULT_CHEAP_THRESHOLD_P = 12.0
 
 
+def _parse_iso(value):
+    """Parse an ISO-8601 timestamp that may end in ``Z`` or ``+00:00``.
+
+    Kraken returns offsets as ``+00:00`` while older code used ``Z``; mixing
+    the two in string comparisons breaks at exact boundaries. Normalise to an
+    aware UTC datetime so ``start <= now < end`` is always correct.
+    """
+    if not value:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
 class EonNext:
 
     def __init__(self):
@@ -315,25 +333,18 @@ class EnergyAccount:
     async def _load_tariff_data(self):
         """Load active tariff/agreement details for this account.
 
-        Requests the half-hourly unit-rate schedule for a window spanning today
-        and tomorrow so the whole day's cheap/expensive blocks are available,
-        matching what the new E.ON web interface shows.
+        ``HalfHourlyTariff.unitRates`` takes no arguments on the current
+        Kraken schema (older revisions accepted ``from``/``to``); it returns
+        the whole retained schedule, so we filter locally by the slots'
+        ``validFrom``/``validTo`` rather than server-side. Requesting the
+        removed args now returns HTTP 400 and leaves the schedule empty,
+        which is why the rate sensor showed a stale value.
         """
-        now = datetime.datetime.now(datetime.timezone.utc)
-        day_start = (now - datetime.timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        day_end = day_start + datetime.timedelta(days=3)
-        date_from = day_start.strftime("%Y-%m-%dT%H:%M:%SZ")
-        date_to = day_end.strftime("%Y-%m-%dT%H:%M:%SZ")
-
         result = await self.api._graphql_post(
             "getAccountAgreements",
-            "query getAccountAgreements($accountNumber: String!, $from: DateTime, $to: DateTime) { properties(accountNumber: $accountNumber) { electricityMeterPoints { mpan agreements { id validFrom validTo tariff { __typename ... on TariffType { displayName fullName tariffCode } ... on StandardTariff { unitRate standingCharge } ... on PrepayTariff { unitRate standingCharge } ... on HalfHourlyTariff { unitRates(from: $from, to: $to) { value validFrom validTo rateType } standingCharge } } unitRateUplifts { unitRateUplift validFrom validTo } } } } }",
+            "query getAccountAgreements($accountNumber: String!) { properties(accountNumber: $accountNumber) { electricityMeterPoints { mpan agreements { id validFrom validTo tariff { __typename ... on TariffType { displayName fullName tariffCode } ... on StandardTariff { unitRate standingCharge } ... on PrepayTariff { unitRate standingCharge } ... on HalfHourlyTariff { unitRates { value validFrom validTo rateType } standingCharge } } unitRateUplifts { unitRateUplift validFrom validTo } } } } }",
             {
                 "accountNumber": self.account_number,
-                "from": date_from,
-                "to": date_to,
             },
         )
 
@@ -422,13 +433,15 @@ class EnergyAccount:
 
     def current_rate_p(self):
         """Effective rate (p/kWh) for the slot containing now, or None."""
-        now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
+        now = datetime.datetime.now(datetime.timezone.utc)
         for r in self.rate_schedule:
-            if r["validFrom"] <= now_iso < r["validTo"]:
+            start = _parse_iso(r["validFrom"])
+            end = _parse_iso(r["validTo"])
+            if start is None or end is None:
+                continue
+            if start <= now < end:
                 base = float(r.get("value") or 0)
-                return round(base + self._uplift_at(now_iso, r.get("mpan")), 4)
+                return round(base + self._uplift_at(r["validFrom"], r.get("mpan")), 4)
         return None
 
     def is_cheap_now(self, threshold_p=DEFAULT_CHEAP_THRESHOLD_P):
@@ -483,11 +496,13 @@ class EnergyAccount:
         windows = self.get_charging_windows()
         if not windows:
             return None
-        now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
+        now = datetime.datetime.now(datetime.timezone.utc)
         for w in windows:
-            if w["start"] <= now_iso < w["end"]:
+            start = _parse_iso(w["start"])
+            end = _parse_iso(w["end"])
+            if start is None or end is None:
+                continue
+            if start <= now < end:
                 return True
         return False
 
