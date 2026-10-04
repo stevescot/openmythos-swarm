@@ -1,0 +1,1528 @@
+# ============================================================================
+# Cheap Electricity Heat Strategy
+#
+# Tariff: EON Next — cheap rate 6.5 p/kWh from 00:00–06:00, else 28.63 p/kWh.
+# Window fires when enable_dynamic_cheap_charging is on AND rate <= threshold.
+#
+# Room pairing - Tado (gas, disabled during window) → Tuya UFH (electric):
+#   climate.kitchen         → climate.kitchen_front + climate.smart_thermostat (kitchen back)
+#   climate.master_bathroom → climate.master_bathroom_2  (ensuite UFH)
+#   climate.kids_bathroom   → climate.kids_bathroom_2
+#   (no Tado equivalent)    → climate.toilet_downstairs
+#
+# CHEAP -> EXPENSIVE (window closes):
+#   Immersion OFF and ALL five Tuya UFH thermostats OFF - unconditionally, not
+#   only when the Tado/UFH swap had been armed. Nothing electric keeps drawing
+#   once the cheap window is gone.
+#
+# EXPENSIVE -> CHEAP (window open and confirmed for 5 minutes):
+#   Each UFH thermostat is put in heat_cool, which is the only "armed" mode
+#   these Tuya devices expose. The thermostat then heats according to the
+#   programme saved ON THE DEVICE. HA deliberately does NOT push a target
+#   temperature: set_temperature overrides the user's on-device schedule.
+#
+# The ElectriQ dehumidifier failed and has been removed from the Tuya app;
+# every Home Assistant reference to it has been removed from this package.
+#
+# Hot water:
+#   water_heater.hot_water (Tado) is disabled during the window and the hour before.
+#   Immersion heater (switch.immersion_heater) is on during the window.
+#   Pre-session disable fires at 23:00 to stop Tado heating water on gas for the
+#   hour before the cheap window opens at 00:00.
+#
+# Kitchen back: sensor unreliable; kitchen front current_temperature drives it.
+# ============================================================================
+
+input_boolean:
+  enable_dynamic_cheap_charging:
+    name: "Enable Dynamic Cheap Charging"
+    icon: mdi:cash-clock
+
+  cheap_heat_prev_immersion_on:
+    name: "Cheap Heat - Prev Immersion On"
+    icon: mdi:water-boiler
+
+  eon_next_boost_session:
+    name: "EON Next Boost Session Active"
+    icon: mdi:lightning-bolt
+
+  cheap_heat_tado_water_pre_saved:
+    name: "Cheap Heat - Tado Water Mode Pre-Saved"
+    icon: mdi:water-thermometer
+
+  cheap_heat_space_heating_active:
+    name: "Cheap Heat - Space Heating Active"
+    icon: mdi:radiator
+
+  # Master switch for the Tado-off / underfloor-on swap only.
+  # OFF = immersion + hot water handling still run on cheap power, but Tado
+  # radiators and UFH are left completely untouched. Turning it OFF while a
+  # swap is running restores Tado and switches UFH off immediately.
+  cheap_heat_allow_space_heating_swap:
+    name: "Cheap Heat - Allow Tado/UFH Swap"
+    icon: mdi:radiator-snowflake
+
+  cheap_heat_override_detected:
+    name: "Cheap Heat - Manual Override Detected"
+    icon: mdi:alert-circle-outline
+
+  eon_sched_cache_active:
+    name: "EON Schedule Cache - Was Active"
+    icon: mdi:ev-station
+
+input_text:
+  cheap_heat_override_message:
+    name: "Cheap Heat - Override Notification Message"
+    max: 255
+
+  eon_sched_cache_s1:
+    name: "EON Schedule Cache - Slot 1 Start"
+    max: 50
+  eon_sched_cache_e1:
+    name: "EON Schedule Cache - Slot 1 End"
+    max: 50
+  eon_sched_cache_s2:
+    name: "EON Schedule Cache - Slot 2 Start"
+    max: 50
+  eon_sched_cache_e2:
+    name: "EON Schedule Cache - Slot 2 End"
+    max: 50
+
+input_number:
+  eon_cheap_rate_threshold:
+    name: "EON Cheap Rate Threshold"
+    min: 1
+    max: 40
+    step: 0.5
+    unit_of_measurement: "p/kWh"
+    mode: box
+    initial: 12
+
+  cheap_heat_outdoor_temp_cutoff:
+    name: "Cheap Heat - Outdoor Temp Cutoff"
+    min: 10
+    max: 25
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+    initial: 16
+
+  cheap_heat_toilet_temperature:
+    name: "Cheap Heat - Toilet Target Temperature"
+    min: 15
+    max: 25
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+    initial: 19
+
+  cheap_heat_kitchen_back_hysteresis:
+    name: "Cheap Heat - Kitchen Back Hysteresis"
+    min: 0.1
+    max: 2.0
+    step: 0.1
+    unit_of_measurement: "°C"
+    mode: box
+    initial: 0.3
+
+  cheap_heat_saved_kitchen_target:
+    name: "Cheap Heat - Saved Kitchen Target"
+    min: 5
+    max: 35
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+
+  cheap_heat_saved_master_bathroom_target:
+    name: "Cheap Heat - Saved Ensuite Target"
+    min: 5
+    max: 35
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+
+  cheap_heat_saved_kids_bathroom_target:
+    name: "Cheap Heat - Saved Kids Bathroom Target"
+    min: 5
+    max: 35
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+
+  cheap_heat_hot_water_force_off_hours:
+    name: "Cheap Heat - Hot Water Force Off Hours"
+    min: 0.5
+    max: 8
+    step: 0.5
+    unit_of_measurement: "h"
+    mode: box
+    initial: 6
+
+  cheap_heat_override_retry_count:
+    name: "Cheap Heat - Override Retry Count"
+    min: 0
+    max: 10
+    step: 1
+    mode: box
+    initial: 0
+
+  cheap_heat_override_max_retries:
+    name: "Cheap Heat - Override Max Retries"
+    min: 1
+    max: 10
+    step: 1
+    mode: box
+    initial: 3
+
+  cheap_heat_immersion_r20_ohm:
+    name: "Cheap Heat - Immersion R20 Reference"
+    min: 10
+    max: 40
+    step: 0.1
+    unit_of_measurement: "Ω"
+    mode: box
+    initial: 20.8
+
+  cheap_heat_immersion_tempco:
+    name: "Cheap Heat - Immersion Temp Coefficient"
+    min: 0.0001
+    max: 0.0040
+    step: 0.0001
+    mode: box
+    initial: 0.0004
+
+input_datetime:
+  cheap_heat_hot_water_forced_off_until:
+    name: "Cheap Heat - Hot Water Forced Off Until"
+    has_date: true
+    has_time: true
+
+  eon_sched_cache_updated:
+    name: "EON Schedule Cache - Last Updated"
+    has_date: true
+    has_time: true
+
+input_select:
+  cheap_heat_prev_tado_kitchen_mode:
+    name: "Cheap Heat - Prev Tado Kitchen Mode"
+    options: ['off', 'auto', 'heat']
+
+  cheap_heat_prev_tado_master_bathroom_mode:
+    name: "Cheap Heat - Prev Tado Ensuite Mode"
+    options: ['off', 'auto', 'heat']
+
+  cheap_heat_prev_tado_kids_bathroom_mode:
+    name: "Cheap Heat - Prev Tado Kids Bathroom Mode"
+    options: ['off', 'auto', 'heat']
+
+  cheap_heat_prev_tado_hot_water_mode:
+    name: "Cheap Heat - Prev Tado Hot Water Mode"
+    options: ['off', 'auto', 'heat']
+
+sensor:
+  - platform: statistics
+    name: "Cheap Heat - Immersion Resistance Mean 30m"
+    entity_id: sensor.cheap_heat_immersion_resistance_instant
+    state_characteristic: mean
+    sampling_size: 600
+    max_age:
+      minutes: 30
+
+template:
+  - binary_sensor:
+      - name: "Cheap Electricity Window Active"
+        unique_id: cheap_electricity_window_active
+        state: >
+          {% set enabled_state = states('input_boolean.enable_dynamic_cheap_charging') %}
+          {% set enabled = enabled_state in ['on','unknown','unavailable'] %}
+          {% set boost = is_state('input_boolean.eon_next_boost_session', 'on') %}
+          {% set rate = states('sensor.eon_next_current_rate_2') | float(999) %}
+          {% set threshold = states('input_number.eon_cheap_rate_threshold') | float(7) %}
+          {# --- REAL TARIFF (from the eon_next custom component, GBP/kWh -> p/kWh) --- #}
+          {% set real_p = (states('sensor.account_unit_rate') | float(-1) * 100) | round(2) %}
+          {% set rate_known = real_p > 0 %}
+          {% set off_s = (as_datetime(state_attr('sensor.account_unit_rate', 'off_peak_start')) if state_attr('sensor.account_unit_rate', 'off_peak_start') not in [none,'unknown','unavailable','none','None',''] else none) %}
+          {% set off_e = (as_datetime(state_attr('sensor.account_unit_rate', 'off_peak_stop')) if state_attr('sensor.account_unit_rate', 'off_peak_stop') not in [none,'unknown','unavailable','none','None',''] else none) %}
+          {% set cur_m = now().hour * 60 + now().minute %}
+          {% set in_real_offpeak = false %}
+          {% if off_s and off_e %}
+          {% set sm = (off_s | as_local).hour * 60 + (off_s | as_local).minute %}
+          {% set em = (off_e | as_local).hour * 60 + (off_e | as_local).minute %}
+          {% if sm == em %}{% set in_real_offpeak = true %}
+          {% elif sm < em %}{% set in_real_offpeak = cur_m >= sm and cur_m < em %}
+          {% else %}{% set in_real_offpeak = cur_m >= sm or cur_m < em %}
+          {% endif %}
+          {% endif %}
+
+          {% set sched_raw = states('sensor.ev_smart_charging_schedule') %}
+          {% set eon_error = sched_raw in ['unknown','unavailable','none','None','','error'] %}
+          {% set no_schedule = sched_raw in ['No schedule','No Schedule','no schedule'] %}
+          {% set now_ts = as_timestamp(now()) | float(0) %}
+          {# --- HARDENED HOLD: a missing/'No Schedule' schedule may only keep the window #}
+          {# alive until the end of the CURRENT 30-min block (measured from when the #}
+          {# schedule sensor last changed), and only while we are already inside the #}
+          {# cached slot that was running. Never start a NEW session from cache. #}
+          {% set sched_state_obj = states['sensor.ev_smart_charging_schedule'] %}
+          {% set sched_lost_ts = as_timestamp(sched_state_obj.last_changed) | float(0) %}
+          {% set hold_deadline_ts = (((sched_lost_ts + 1799) // 1800) * 1800) if sched_lost_ts > 0 else 0 %}
+          {% set cache_ts = as_timestamp(states('input_datetime.eon_sched_cache_updated')) | float(0) %}
+          {% set cache_fresh = cache_ts > 0 and (now_ts - cache_ts) < 86400 %}
+          {% set cs1 = states('input_text.eon_sched_cache_s1') %}
+          {% set ce1 = states('input_text.eon_sched_cache_e1') %}
+          {% set cs2 = states('input_text.eon_sched_cache_s2') %}
+          {% set ce2 = states('input_text.eon_sched_cache_e2') %}
+          {% set cs1_ts = as_timestamp(cs1) if cs1 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set ce1_ts = as_timestamp(ce1) if ce1 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set cs2_ts = as_timestamp(cs2) if cs2 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set ce2_ts = as_timestamp(ce2) if ce2 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set ce1_hold_ts = ((((ce1_ts + 1799) // 1800) * 1800)) if ce1_ts > 0 else 0 %}
+          {% set ce2_hold_ts = ((((ce2_ts + 1799) // 1800) * 1800)) if ce2_ts > 0 else 0 %}
+          {# must be INSIDE a cached slot (start-floor bounded), not merely before its end #}
+          {% set cached_in_slot_1 = ce1_hold_ts > 0 and now_ts < ce1_hold_ts and (cs1_ts == 0 or now_ts >= ((cs1_ts // 1800) * 1800)) %}
+          {% set cached_in_slot_2 = ce2_hold_ts > 0 and now_ts < ce2_hold_ts and (cs2_ts == 0 or now_ts >= ((cs2_ts // 1800) * 1800)) %}
+          {% set cached_window_active = cache_fresh and (cached_in_slot_1 or cached_in_slot_2) %}
+          {% set sched_hold = (eon_error or no_schedule) and cached_window_active and hold_deadline_ts > 0 and now_ts < hold_deadline_ts %}
+          {% if sched_hold %}
+          {% set schedule_active = is_state('input_boolean.eon_sched_cache_active', 'on') %}
+          {% set s1 = cs1 %}
+          {% set e1 = ce1 %}
+          {% set s2 = cs2 %}
+          {% set e2 = ce2 %}
+          {% else %}
+          {% set schedule_active = is_state('sensor.ev_smart_charging_schedule', 'Active') %}
+          {% set s1 = states('sensor.ev_next_charge_start') %}
+          {% set e1 = states('sensor.ev_next_charge_end') %}
+          {% set s2 = states('sensor.ev_next_charge_start_2') %}
+          {% set e2 = states('sensor.ev_next_charge_end_2') %}
+          {% endif %}
+          {% set s1_ts = as_timestamp(s1) if s1 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set e1_ts = as_timestamp(e1) if e1 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set s2_ts = as_timestamp(s2) if s2 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set e2_ts = as_timestamp(e2) if e2 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set e1_effective_ts = ((((e1_ts + 1799) // 1800) * 1800)) if sched_hold and e1_ts > 0 else e1_ts %}
+          {% set e2_effective_ts = ((((e2_ts + 1799) // 1800) * 1800)) if sched_hold and e2_ts > 0 else e2_ts %}
+
+          {% set s1_floor = ((s1_ts // 1800) * 1800) if s1_ts > 0 else 0 %}
+          {% set s2_floor = ((s2_ts // 1800) * 1800) if s2_ts > 0 else 0 %}
+          {% set fixed_clock_window = now().hour < 6 %}
+
+          {# in_slot: end must be in the future; start-floor gates entry but drifts within
+             the same 30-min block are tolerated; s1_floor==0 means no start available.
+             While holding on a stale schedule, also capped by hold_deadline_ts (block end). #}
+          {% set in_slot_1 = e1_effective_ts > 0 and now_ts < e1_effective_ts and (s1_floor == 0 or now_ts >= s1_floor) and ((not sched_hold) or now_ts < hold_deadline_ts) %}
+          {% set in_slot_2 = e2_effective_ts > 0 and now_ts < e2_effective_ts and (s2_floor == 0 or now_ts >= s2_floor) and ((not sched_hold) or now_ts < hold_deadline_ts) %}
+          {% set ev_window = in_slot_1 or in_slot_2 %}
+          {% set ev_fallback = schedule_active and not ev_window and e1_ts == 0 and not (eon_error or no_schedule) %}
+
+          {# An ACTIVE EV charge-dispatch window is authoritative: E.ON Drive Smart
+             only dispatches the car during cheap periods, so while a window is
+             running we report cheap even though the household tariff rate is
+             still the expensive day rate. The tariff rate is only the deciding
+             signal when no charge window is active. #}
+          {% if not enabled %}off
+          {% elif boost %}on
+          {% elif ev_window or ev_fallback or in_real_offpeak %}on
+          {% elif rate_known %}{% if real_p <= threshold %}on{% else %}off{% endif %}
+          {% elif fixed_clock_window %}on
+          {% else %}off{% endif %}
+        attributes:
+          source_rate_p_kwh: "{{ states('sensor.eon_next_current_rate_2') }}"
+          real_rate_p_kwh: "{{ state_attr('sensor.eon_next_current_rate_2', 'real_rate_p_kwh') }}"
+          real_period: "{{ state_attr('sensor.account_unit_rate', 'current_period') }}"
+          real_offpeak_known: >-
+            {{ state_attr('sensor.eon_next_current_rate_2', 'real_rate_p_kwh') != 'unavailable' }}
+          in_real_offpeak: >-
+            {%- set off_s = (as_datetime(state_attr('sensor.account_unit_rate', 'off_peak_start')) if state_attr('sensor.account_unit_rate', 'off_peak_start') not in [none,'unknown','unavailable','none','None',''] else none) -%}
+            {%- set off_e = (as_datetime(state_attr('sensor.account_unit_rate', 'off_peak_stop')) if state_attr('sensor.account_unit_rate', 'off_peak_stop') not in [none,'unknown','unavailable','none','None',''] else none) -%}
+            {%- if off_s and off_e -%}
+              {%- set sm = (off_s | as_local).hour * 60 + (off_s | as_local).minute -%}
+              {%- set em = (off_e | as_local).hour * 60 + (off_e | as_local).minute -%}
+              {%- set cm = now().hour * 60 + now().minute -%}
+              {{ (sm == em) or (sm < em and cm >= sm and cm < em) or (sm > em and (cm >= sm or cm < em)) }}
+            {%- else -%}unknown{%- endif -%}
+          offpeak_local: >-
+            {%- set off_s = (as_datetime(state_attr('sensor.account_unit_rate', 'off_peak_start')) if state_attr('sensor.account_unit_rate', 'off_peak_start') not in [none,'unknown','unavailable','none','None',''] else none) -%}
+            {%- set off_e = (as_datetime(state_attr('sensor.account_unit_rate', 'off_peak_stop')) if state_attr('sensor.account_unit_rate', 'off_peak_stop') not in [none,'unknown','unavailable','none','None',''] else none) -%}
+            {%- if off_s and off_e -%}
+              {{ (off_s | as_local).strftime('%H:%M') }}-{{ (off_e | as_local).strftime('%H:%M') }}
+            {%- else -%}unknown{%- endif -%}
+          decision: >-
+            {%- set rp = state_attr('sensor.eon_next_current_rate_2', 'real_rate_p_kwh') -%}
+            {%- set thr = states('input_number.eon_cheap_rate_threshold') | float(7) -%}
+            {%- set off_s = (as_datetime(state_attr('sensor.account_unit_rate', 'off_peak_start')) if state_attr('sensor.account_unit_rate', 'off_peak_start') not in [none,'unknown','unavailable','none','None',''] else none) -%}
+            {%- set off_e = (as_datetime(state_attr('sensor.account_unit_rate', 'off_peak_stop')) if state_attr('sensor.account_unit_rate', 'off_peak_stop') not in [none,'unknown','unavailable','none','None',''] else none) -%}
+            {%- set cm = now().hour * 60 + now().minute -%}
+            {%- set in_real_offpeak = false -%}
+            {%- if off_s and off_e -%}
+              {%- set sm = (off_s | as_local).hour * 60 + (off_s | as_local).minute -%}
+              {%- set em = (off_e | as_local).hour * 60 + (off_e | as_local).minute -%}
+              {%- if sm == em -%}{%- set in_real_offpeak = true -%}
+              {%- elif sm < em -%}{%- set in_real_offpeak = cm >= sm and cm < em -%}
+              {%- else -%}{%- set in_real_offpeak = cm >= sm or cm < em -%}
+              {%- endif -%}
+            {%- endif -%}
+            {%- set cs = as_datetime(states('sensor.ev_next_charge_start')) if states('sensor.ev_next_charge_start') not in ['unknown','unavailable','none','None',''] else none -%}
+            {%- set ce = as_datetime(states('sensor.ev_next_charge_end')) if states('sensor.ev_next_charge_end') not in ['unknown','unavailable','none','None',''] else none -%}
+            {%- set ev_charging = cs is not none and ce is not none and cs <= now() and now() < ce -%}
+            {%- if is_state('input_boolean.enable_dynamic_cheap_charging', 'off') -%}disabled
+            {%- elif is_state('input_boolean.eon_next_boost_session', 'on') -%}boost
+            {%- elif ev_charging -%}cheap (EV charge dispatch active)
+            {%- elif in_real_offpeak -%}cheap (off-peak tariff window)
+            {%- elif rp not in ['unavailable', 'unknown', 'None', ''] and rp | float(999) <= thr -%}cheap (real tariff {{ rp }}p)
+            {%- elif rp not in ['unavailable', 'unknown', 'None', ''] -%}expensive (real tariff {{ rp }}p)
+            {%- else -%}tariff_unavailable (fallback logic)
+            {%- endif -%}
+          threshold_p_kwh: "{{ states('input_number.eon_cheap_rate_threshold') }}"
+          gate_state: "{{ states('input_boolean.enable_dynamic_cheap_charging') }}"
+          schedule_cache_active: >
+            {% set sched_raw = states('sensor.ev_smart_charging_schedule') %}
+            {% set eon_error = sched_raw in ['unknown','unavailable','none','None','','error'] %}
+            {% set no_schedule = sched_raw in ['No schedule','No Schedule','no schedule'] %}
+            {% set now_ts = as_timestamp(now()) | float(0) %}
+            {% set sched_state_obj = states['sensor.ev_smart_charging_schedule'] %}
+            {% set sched_lost_ts = as_timestamp(sched_state_obj.last_changed) | float(0) %}
+            {% set hold_deadline_ts = (((sched_lost_ts + 1799) // 1800) * 1800) if sched_lost_ts > 0 else 0 %}
+            {% set cache_ts = as_timestamp(states('input_datetime.eon_sched_cache_updated')) | float(0) %}
+            {% set cache_fresh = cache_ts > 0 and (now_ts - cache_ts) < 86400 %}
+            {% set cs1 = states('input_text.eon_sched_cache_s1') %}
+            {% set ce1 = states('input_text.eon_sched_cache_e1') %}
+            {% set cs2 = states('input_text.eon_sched_cache_s2') %}
+            {% set ce2 = states('input_text.eon_sched_cache_e2') %}
+            {% set cs1_ts = as_timestamp(cs1) if cs1 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set ce1_ts = as_timestamp(ce1) if ce1 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set cs2_ts = as_timestamp(cs2) if cs2 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set ce2_ts = as_timestamp(ce2) if ce2 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set ce1_hold_ts = ((((ce1_ts + 1799) // 1800) * 1800)) if ce1_ts > 0 else 0 %}
+            {% set ce2_hold_ts = ((((ce2_ts + 1799) // 1800) * 1800)) if ce2_ts > 0 else 0 %}
+            {% set cached_in_slot_1 = ce1_hold_ts > 0 and now_ts < ce1_hold_ts and (cs1_ts == 0 or now_ts >= ((cs1_ts // 1800) * 1800)) %}
+            {% set cached_in_slot_2 = ce2_hold_ts > 0 and now_ts < ce2_hold_ts and (cs2_ts == 0 or now_ts >= ((cs2_ts // 1800) * 1800)) %}
+            {% set cached_window_active = cache_fresh and (cached_in_slot_1 or cached_in_slot_2) %}
+            {{ (eon_error or no_schedule) and cached_window_active and hold_deadline_ts > 0 and now_ts < hold_deadline_ts }}
+          ev_schedule_state: >
+            {% set sched_raw = states('sensor.ev_smart_charging_schedule') %}
+            {% set eon_error = sched_raw in ['unknown','unavailable','none','None','','error'] %}
+            {% set no_schedule = sched_raw in ['No schedule','No Schedule','no schedule'] %}
+            {% set now_ts = as_timestamp(now()) | float(0) %}
+            {% set sched_state_obj = states['sensor.ev_smart_charging_schedule'] %}
+            {% set sched_lost_ts = as_timestamp(sched_state_obj.last_changed) | float(0) %}
+            {% set hold_deadline_ts = (((sched_lost_ts + 1799) // 1800) * 1800) if sched_lost_ts > 0 else 0 %}
+            {% set cache_ts = as_timestamp(states('input_datetime.eon_sched_cache_updated')) | float(0) %}
+            {% set cache_fresh = cache_ts > 0 and (now_ts - cache_ts) < 86400 %}
+            {% set cs1 = states('input_text.eon_sched_cache_s1') %}
+            {% set ce1 = states('input_text.eon_sched_cache_e1') %}
+            {% set cs2 = states('input_text.eon_sched_cache_s2') %}
+            {% set ce2 = states('input_text.eon_sched_cache_e2') %}
+            {% set cs1_ts = as_timestamp(cs1) if cs1 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set ce1_ts = as_timestamp(ce1) if ce1 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set cs2_ts = as_timestamp(cs2) if cs2 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set ce2_ts = as_timestamp(ce2) if ce2 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set ce1_hold_ts = ((((ce1_ts + 1799) // 1800) * 1800)) if ce1_ts > 0 else 0 %}
+            {% set ce2_hold_ts = ((((ce2_ts + 1799) // 1800) * 1800)) if ce2_ts > 0 else 0 %}
+            {% set cached_in_slot_1 = ce1_hold_ts > 0 and now_ts < ce1_hold_ts and (cs1_ts == 0 or now_ts >= ((cs1_ts // 1800) * 1800)) %}
+            {% set cached_in_slot_2 = ce2_hold_ts > 0 and now_ts < ce2_hold_ts and (cs2_ts == 0 or now_ts >= ((cs2_ts // 1800) * 1800)) %}
+            {% set cached_window_active = cache_fresh and (cached_in_slot_1 or cached_in_slot_2) %}
+            {% set sched_hold = (eon_error or no_schedule) and cached_window_active and hold_deadline_ts > 0 and now_ts < hold_deadline_ts %}
+            {% if sched_hold %}cached-hold ({{ sched_raw }}){% elif eon_error or no_schedule %}{{ sched_raw }} (hold expired){% else %}{{ sched_raw }}{% endif %}
+          reason: >
+            {% set boost = is_state('input_boolean.eon_next_boost_session', 'on') %}
+            {% set rate = states('sensor.eon_next_current_rate_2') | float(999) %}
+            {% set threshold = states('input_number.eon_cheap_rate_threshold') | float(7) %}
+            {% set real_p = (states('sensor.account_unit_rate') | float(-1) * 100) | round(2) %}
+            {% set off_s = (as_datetime(state_attr('sensor.account_unit_rate', 'off_peak_start')) if state_attr('sensor.account_unit_rate', 'off_peak_start') not in [none,'unknown','unavailable','none','None',''] else none) %}
+            {% set off_e = (as_datetime(state_attr('sensor.account_unit_rate', 'off_peak_stop')) if state_attr('sensor.account_unit_rate', 'off_peak_stop') not in [none,'unknown','unavailable','none','None',''] else none) %}
+            {% set cur_m = now().hour * 60 + now().minute %}
+            {% set in_real_offpeak = false %}
+            {% if off_s and off_e %}
+            {% set sm = (off_s | as_local).hour * 60 + (off_s | as_local).minute %}
+            {% set em = (off_e | as_local).hour * 60 + (off_e | as_local).minute %}
+            {% if sm == em %}{% set in_real_offpeak = true %}
+            {% elif sm < em %}{% set in_real_offpeak = cur_m >= sm and cur_m < em %}
+            {% else %}{% set in_real_offpeak = cur_m >= sm or cur_m < em %}
+            {% endif %}
+            {% endif %}
+            {% set sched_raw = states('sensor.ev_smart_charging_schedule') %}
+            {% set eon_error = sched_raw in ['unknown','unavailable','none','None','','error'] %}
+            {% set no_schedule = sched_raw in ['No schedule','No Schedule','no schedule'] %}
+            {% set now_ts = as_timestamp(now()) | float(0) %}
+            {% set sched_state_obj = states['sensor.ev_smart_charging_schedule'] %}
+            {% set sched_lost_ts = as_timestamp(sched_state_obj.last_changed) | float(0) %}
+            {% set hold_deadline_ts = (((sched_lost_ts + 1799) // 1800) * 1800) if sched_lost_ts > 0 else 0 %}
+            {% set cache_ts = as_timestamp(states('input_datetime.eon_sched_cache_updated')) | float(0) %}
+            {% set cache_fresh = cache_ts > 0 and (now_ts - cache_ts) < 86400 %}
+            {% set cs1 = states('input_text.eon_sched_cache_s1') %}
+            {% set ce1 = states('input_text.eon_sched_cache_e1') %}
+            {% set cs2 = states('input_text.eon_sched_cache_s2') %}
+            {% set ce2 = states('input_text.eon_sched_cache_e2') %}
+            {% set cs1_ts = as_timestamp(cs1) if cs1 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set ce1_ts = as_timestamp(ce1) if ce1 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set cs2_ts = as_timestamp(cs2) if cs2 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set ce2_ts = as_timestamp(ce2) if ce2 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set ce1_hold_ts = ((((ce1_ts + 1799) // 1800) * 1800)) if ce1_ts > 0 else 0 %}
+            {% set ce2_hold_ts = ((((ce2_ts + 1799) // 1800) * 1800)) if ce2_ts > 0 else 0 %}
+            {% set cached_in_slot_1 = ce1_hold_ts > 0 and now_ts < ce1_hold_ts and (cs1_ts == 0 or now_ts >= ((cs1_ts // 1800) * 1800)) %}
+            {% set cached_in_slot_2 = ce2_hold_ts > 0 and now_ts < ce2_hold_ts and (cs2_ts == 0 or now_ts >= ((cs2_ts // 1800) * 1800)) %}
+            {% set cached_window_active = cache_fresh and (cached_in_slot_1 or cached_in_slot_2) %}
+            {% set sched_hold = (eon_error or no_schedule) and cached_window_active and hold_deadline_ts > 0 and now_ts < hold_deadline_ts %}
+            {% if sched_hold %}
+            {% set schedule_active = is_state('input_boolean.eon_sched_cache_active', 'on') %}
+            {% set s1 = cs1 %}
+            {% set e1 = ce1 %}
+            {% set s2 = cs2 %}
+            {% set e2 = ce2 %}
+            {% else %}
+            {% set schedule_active = is_state('sensor.ev_smart_charging_schedule', 'Active') %}
+            {% set s1 = states('sensor.ev_next_charge_start') %}
+            {% set e1 = states('sensor.ev_next_charge_end') %}
+            {% set s2 = states('sensor.ev_next_charge_start_2') %}
+            {% set e2 = states('sensor.ev_next_charge_end_2') %}
+            {% endif %}
+            {% set s1_ts = as_timestamp(s1) if s1 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set e1_ts = as_timestamp(e1) if e1 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set s2_ts = as_timestamp(s2) if s2 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set e2_ts = as_timestamp(e2) if e2 not in ['unknown','unavailable','none','None',''] else 0 %}
+            {% set e1_effective_ts = ((((e1_ts + 1799) // 1800) * 1800)) if sched_hold and e1_ts > 0 else e1_ts %}
+            {% set e2_effective_ts = ((((e2_ts + 1799) // 1800) * 1800)) if sched_hold and e2_ts > 0 else e2_ts %}
+            {% set s1_floor = ((s1_ts // 1800) * 1800) if s1_ts > 0 else 0 %}
+            {% set s2_floor = ((s2_ts // 1800) * 1800) if s2_ts > 0 else 0 %}
+            {% set fixed_clock_window = now().hour < 6 %}
+            {% set in_slot_1 = e1_effective_ts > 0 and now_ts < e1_effective_ts and (s1_floor == 0 or now_ts >= s1_floor) and ((not sched_hold) or now_ts < hold_deadline_ts) %}
+            {% set in_slot_2 = e2_effective_ts > 0 and now_ts < e2_effective_ts and (s2_floor == 0 or now_ts >= s2_floor) and ((not sched_hold) or now_ts < hold_deadline_ts) %}
+            {% set ev_window = in_slot_1 or in_slot_2 %}
+            {% set ev_fallback = schedule_active and not ev_window and e1_ts == 0 and not (eon_error or no_schedule) %}
+            {% if boost %}
+              eon_next_boost_session
+            {% elif ev_window %}
+              ev_charge_dispatch_active
+            {% elif ev_fallback %}
+              ev_schedule_active_fallback
+            {% elif in_real_offpeak %}
+              real_tariff_off_peak
+            {% elif real_p > 0 and real_p <= threshold %}
+              cheap_rate_{{ real_p }}p
+            {% elif real_p > 0 %}
+              real_tariff_expensive_{{ real_p }}p
+            {% elif fixed_clock_window %}
+              fallback_clock_window_0000_0600
+            {% elif eon_error or no_schedule %}
+              sched_unavailable_hold_expired
+            {% else %}
+              expensive_rate
+            {% endif %}
+  - sensor:
+      - name: "EON Next Current Rate 2"
+        unique_id: eon_next_current_rate_2
+        unit_of_measurement: "p/kWh"
+        icon: mdi:cash-multiple
+        state: >
+          {% set sched_raw = states('sensor.ev_smart_charging_schedule') %}
+          {% set eon_error = sched_raw in ['unknown','unavailable','none','None','','error'] %}
+          {% set no_schedule = sched_raw in ['No schedule','No Schedule','no schedule'] %}
+          {% set now_ts = as_timestamp(now()) | float(0) %}
+          {% set sched_state_obj = states['sensor.ev_smart_charging_schedule'] %}
+          {% set sched_lost_ts = as_timestamp(sched_state_obj.last_changed) | float(0) %}
+          {% set hold_deadline_ts = (((sched_lost_ts + 1799) // 1800) * 1800) if sched_lost_ts > 0 else 0 %}
+          {% set cache_ts = as_timestamp(states('input_datetime.eon_sched_cache_updated')) | float(0) %}
+          {% set cache_fresh = cache_ts > 0 and (now_ts - cache_ts) < 86400 %}
+          {% set cs1 = states('input_text.eon_sched_cache_s1') %}
+          {% set ce1 = states('input_text.eon_sched_cache_e1') %}
+          {% set cs2 = states('input_text.eon_sched_cache_s2') %}
+          {% set ce2 = states('input_text.eon_sched_cache_e2') %}
+          {% set cs1_ts = as_timestamp(cs1) if cs1 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set ce1_ts = as_timestamp(ce1) if ce1 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set cs2_ts = as_timestamp(cs2) if cs2 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set ce2_ts = as_timestamp(ce2) if ce2 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set ce1_hold_ts = ((((ce1_ts + 1799) // 1800) * 1800)) if ce1_ts > 0 else 0 %}
+          {% set ce2_hold_ts = ((((ce2_ts + 1799) // 1800) * 1800)) if ce2_ts > 0 else 0 %}
+          {% set cached_in_slot_1 = ce1_hold_ts > 0 and now_ts < ce1_hold_ts and (cs1_ts == 0 or now_ts >= ((cs1_ts // 1800) * 1800)) %}
+          {% set cached_in_slot_2 = ce2_hold_ts > 0 and now_ts < ce2_hold_ts and (cs2_ts == 0 or now_ts >= ((cs2_ts // 1800) * 1800)) %}
+          {% set cached_window_active = cache_fresh and (cached_in_slot_1 or cached_in_slot_2) %}
+          {% set sched_hold = (eon_error or no_schedule) and cached_window_active and hold_deadline_ts > 0 and now_ts < hold_deadline_ts %}
+          {% if sched_hold %}
+          {% set schedule_active = is_state('input_boolean.eon_sched_cache_active', 'on') %}
+          {% set s1 = cs1 %}
+          {% set e1 = ce1 %}
+          {% set s2 = cs2 %}
+          {% set e2 = ce2 %}
+          {% else %}
+          {% set schedule_active = is_state('sensor.ev_smart_charging_schedule', 'Active') %}
+          {% set s1 = states('sensor.ev_next_charge_start') %}
+          {% set e1 = states('sensor.ev_next_charge_end') %}
+          {% set s2 = states('sensor.ev_next_charge_start_2') %}
+          {% set e2 = states('sensor.ev_next_charge_end_2') %}
+          {% endif %}
+          {% set s1_ts = as_timestamp(s1) if s1 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set e1_ts = as_timestamp(e1) if e1 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set s2_ts = as_timestamp(s2) if s2 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set e2_ts = as_timestamp(e2) if e2 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set e1_effective_ts = ((((e1_ts + 1799) // 1800) * 1800)) if sched_hold and e1_ts > 0 else e1_ts %}
+          {% set e2_effective_ts = ((((e2_ts + 1799) // 1800) * 1800)) if sched_hold and e2_ts > 0 else e2_ts %}
+          {% set s1_floor = ((s1_ts // 1800) * 1800) if s1_ts > 0 else 0 %}
+          {% set s2_floor = ((s2_ts // 1800) * 1800) if s2_ts > 0 else 0 %}
+          {% set in_slot_1 = e1_effective_ts > 0 and now_ts < e1_effective_ts and (s1_floor == 0 or now_ts >= s1_floor) and ((not sched_hold) or now_ts < hold_deadline_ts) %}
+          {% set in_slot_2 = e2_effective_ts > 0 and now_ts < e2_effective_ts and (s2_floor == 0 or now_ts >= s2_floor) and ((not sched_hold) or now_ts < hold_deadline_ts) %}
+          {% set in_schedule = schedule_active and (in_slot_1 or in_slot_2) %}
+          {% set fixed_clock_window = now().hour < 6 %}
+          {# --- REAL TARIFF FIRST: the eon_next component now reports the actual #}
+          {# E.ON Next range that covers "now" (GBP/kWh). Only fall back to the #}
+          {# EV-schedule / clock heuristic when the component is unavailable. #}
+          {% set real_p = (states('sensor.account_unit_rate') | float(-1) * 100) | round(2) %}
+          {% if real_p > 0 %}{{ real_p }}
+          {% elif in_schedule or fixed_clock_window %}2.99{% else %}25.12{% endif %}
+        attributes:
+          source: >-
+            {%- set rp = (states('sensor.account_unit_rate') | float(-1) * 100) | round(2) -%}
+            {%- if rp > 0 -%}eon_next component (real tariff)
+            {%- else -%}fallback (ev schedule or 00:00-06:00 clock){%- endif -%}
+          real_rate_p_kwh: >-
+            {%- set rp = (states('sensor.account_unit_rate') | float(-1) * 100) | round(2) -%}
+            {{ rp if rp > 0 else 'unavailable' }}
+          real_period: "{{ state_attr('sensor.account_unit_rate', 'current_period') }}"
+          rate_valid_from: "{{ state_attr('sensor.account_unit_rate', 'rate_valid_from') }}"
+          rate_valid_to: "{{ state_attr('sensor.account_unit_rate', 'rate_valid_to') }}"
+          off_peak_start: "{{ state_attr('sensor.account_unit_rate', 'off_peak_start') }}"
+          off_peak_stop: "{{ state_attr('sensor.account_unit_rate', 'off_peak_stop') }}"
+          in_schedule: >-
+            {%- set ok = ['unknown','unavailable','none','None',''] -%}
+            {%- set active = is_state('sensor.ev_smart_charging_schedule', 'Active') -%}
+            {%- set now_ts = as_timestamp(now()) | float(0) -%}
+            {%- set s1 = states('sensor.ev_next_charge_start') -%}
+            {%- set e1 = states('sensor.ev_next_charge_end') -%}
+            {%- set s2 = states('sensor.ev_next_charge_start_2') -%}
+            {%- set e2 = states('sensor.ev_next_charge_end_2') -%}
+            {%- set s1_ts = as_timestamp(s1) if s1 not in ok else 0 -%}
+            {%- set e1_ts = as_timestamp(e1) if e1 not in ok else 0 -%}
+            {%- set s2_ts = as_timestamp(s2) if s2 not in ok else 0 -%}
+            {%- set e2_ts = as_timestamp(e2) if e2 not in ok else 0 -%}
+            {%- set in1 = e1_ts > 0 and now_ts < e1_ts and (s1_ts == 0 or now_ts >= s1_ts) -%}
+            {%- set in2 = e2_ts > 0 and now_ts < e2_ts and (s2_ts == 0 or now_ts >= s2_ts) -%}
+            {{ active and (in1 or in2) }}
+          fixed_clock_window: "{{ now().hour < 6 }}"
+          schedule_state: "{{ states('sensor.ev_smart_charging_schedule') }}"
+
+      - name: "Cheap Heat - Immersion Resistance Instant"
+        unique_id: cheap_heat_immersion_resistance_instant
+        unit_of_measurement: "Ω"
+        state_class: measurement
+        icon: mdi:omega
+        state: >
+          {% set v = states('sensor.immersion_heater_voltage') | float(0) %}
+          {% set i = states('sensor.immersion_heater_current') | float(0) %}
+          {# Return none (not the string "unknown") so the numeric validator is happy. #}
+          {% if i > 0.2 and v > 50 %}
+            {{ (v / i) | round(3) }}
+          {% else %}
+            {{ none }}
+          {% endif %}
+
+      - name: "Cheap Heat - Immersion Water Temperature Estimate"
+        unique_id: cheap_heat_immersion_water_temp_estimate
+        unit_of_measurement: "°C"
+        state_class: measurement
+        device_class: temperature
+        icon: mdi:thermometer-water
+        state: >
+          {% set r_avg = states('sensor.cheap_heat_immersion_resistance_mean_30m') | float(0) %}
+          {% set r20 = states('input_number.cheap_heat_immersion_r20_ohm') | float(20.8) %}
+          {% set alpha = states('input_number.cheap_heat_immersion_tempco') | float(0.0004) %}
+          {% set i_current = states('sensor.immersion_heater_current') | float(0) %}
+          {% set is_heating = i_current > 0.5 %}
+          {% if is_heating and r_avg > 0 and r20 > 0 and alpha > 0 %}
+            {% set t = 20 + (((r_avg / r20) - 1) / alpha) %}
+            {{ [ [t, 0] | max, 70 ] | min | round(1) }}
+          {% else %}
+            {{ none }}
+          {% endif %}
+        attributes:
+          note: "WHILE HEATING (I > 0.5A): estimated from element resistance. AFTER THERMOSTAT CLICKS: water cooling from ~70°C to ambient; bulk water temp unknown without dedicated sensor."
+          r20_ohm: "{{ states('input_number.cheap_heat_immersion_r20_ohm') }}"
+          temp_coefficient: "{{ states('input_number.cheap_heat_immersion_tempco') }}"
+          current_a: "{{ states('sensor.immersion_heater_current') }}"
+          limits: "Element 20–70°C. Water estimate only reliable during active heating."
+automation:
+  # ---------------------------------------------------------------------------
+  # PRE-SESSION: disable Tado hot water one hour before cheap window opens
+  # Fires at 23:00 every night, but only when cheap charging is enabled.
+  # Saves the current hot water operation mode and flags that it was pre-saved
+  # so the 00:00 enable automation does not overwrite the snapshot.
+  # ---------------------------------------------------------------------------
+  - id: cheap_heat_tado_water_pre_disable
+    alias: "Cheap Heat - Pre-Disable Tado Hot Water Before Cheap Window"
+    description: >
+      At 23:00, if cheap charging is enabled, save the Tado hot water mode and
+      turn it off. This stops the gas boiler heating water in the hour before
+      the cheap electricity window opens at 00:00.
+    trigger:
+      - platform: time
+        at: "23:00:00"
+    condition:
+      - condition: state
+        entity_id: input_boolean.enable_dynamic_cheap_charging
+        state: 'on'
+    action:
+      - service: input_select.select_option
+        target:
+          entity_id: input_select.cheap_heat_prev_tado_hot_water_mode
+        data:
+          option: >
+            {{ states('water_heater.hot_water')
+               if states('water_heater.hot_water') in ['off','auto','heat']
+               else 'auto' }}
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.cheap_heat_tado_water_pre_saved
+      - service: water_heater.set_operation_mode
+        target:
+          entity_id: water_heater.hot_water
+        data:
+          operation_mode: 'off'
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.cheap_heat_hot_water_forced_off_until
+        data:
+          datetime: >
+            {{ (now() + timedelta(hours=(states('input_number.cheap_heat_hot_water_force_off_hours') | float(6)))).strftime('%Y-%m-%d %H:%M:%S') }}
+    mode: single
+
+  # ---------------------------------------------------------------------------
+  # INDICATOR: flash lamp green at cheap-window start, then restore warm white
+  # ---------------------------------------------------------------------------
+  - id: cheap_heat_indicator_lamp_green_at_start
+    alias: "Cheap Heat - Indicator Lamp Green At Start"
+    description: >
+      Flash indicator lamp green when cheap electricity window starts, then
+      restore previous state (or show warm white briefly if it was off).
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.cheap_electricity_window_active
+        from: 'off'
+        to: 'on'
+    variables:
+      indicator_lamp: light.product_name
+      was_on: "{{ is_state(indicator_lamp, 'on') }}"
+      prev_brightness: "{{ state_attr(indicator_lamp, 'brightness') | int(180) }}"
+      prev_color_temp_kelvin: "{{ state_attr(indicator_lamp, 'color_temp_kelvin') | int(2700) }}"
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: "{{ indicator_lamp }}"
+        data:
+          rgb_color: [0, 255, 0]
+          brightness: 255
+      - delay: "00:00:03"
+      - choose:
+          - conditions: "{{ was_on }}"
+            sequence:
+              - service: light.turn_on
+                target:
+                  entity_id: "{{ indicator_lamp }}"
+                data:
+                  color_temp_kelvin: "{{ prev_color_temp_kelvin }}"
+                  brightness: "{{ prev_brightness }}"
+        default:
+          - service: light.turn_on
+            target:
+              entity_id: "{{ indicator_lamp }}"
+            data:
+              color_temp_kelvin: 2700
+              brightness: 170
+          - delay: "00:00:04"
+          - service: light.turn_off
+            target:
+              entity_id: "{{ indicator_lamp }}"
+    mode: single
+
+  # ---------------------------------------------------------------------------
+  # ON WINDOW START: always enable immersion independently of UFH demand logic
+  # ---------------------------------------------------------------------------
+  - id: cheap_heat_immersion_on_at_window_start
+    alias: "Cheap Heat - Immersion On At Cheap Window Start"
+    initial_state: true
+    description: >
+      Ensure immersion heater is enabled whenever cheap electricity window starts,
+      even if UFH/Tado space-heating branch is skipped (warm weather or no demand).
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.cheap_electricity_window_active
+        to: 'on'
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: state
+        entity_id: binary_sensor.cheap_electricity_window_active
+        state: 'on'
+    action:
+      - service: switch.turn_on
+        target:
+          entity_id: switch.immersion_heater
+    mode: single
+
+  # ---------------------------------------------------------------------------
+  # WHILE WINDOW ACTIVE: self-heal electric outputs if start-edge trigger was missed
+  # ---------------------------------------------------------------------------
+  - id: cheap_heat_ensure_core_outputs_while_window_on
+    alias: "Cheap Heat - Ensure Core Outputs While Window On"
+    initial_state: true
+    description: >
+      Every 2 minutes, if cheap window is active, ensure the immersion heater is
+      on. This protects against missed state-edge triggers (e.g. unknown->on
+      transitions during startup/reload).
+    trigger:
+      - platform: time_pattern
+        minutes: "/2"
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: state
+        entity_id: binary_sensor.cheap_electricity_window_active
+        state: 'on'
+    action:
+      - choose:
+          - conditions: "{{ is_state('switch.immersion_heater', 'off') }}"
+            sequence:
+              - service: switch.turn_on
+                target:
+                  entity_id: switch.immersion_heater
+    mode: single
+
+  # ---------------------------------------------------------------------------
+  # WINDOW END: nothing electric may keep running once the cheap window closes
+  # ---------------------------------------------------------------------------
+  - id: cheap_heat_turn_off_outputs_at_window_end
+    alias: "Cheap Heat - Turn Off Outputs At Window End"
+    initial_state: true
+    description: >
+      When the cheap electricity window closes, turn the immersion heater off and
+      force every Tuya UFH thermostat off. This runs unconditionally - even if
+      the Tado/UFH swap was never armed or cheap was only briefly confirmed -
+      so no electric heating can carry over into an expensive period.
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.cheap_electricity_window_active
+        to: 'off'
+    action:
+      - service: switch.turn_off
+        target:
+          entity_id: switch.immersion_heater
+      - service: climate.set_hvac_mode
+        target:
+          entity_id:
+            - climate.kitchen_front
+            - climate.smart_thermostat
+            - climate.master_bathroom_2
+            - climate.kids_bathroom_2
+            - climate.toilet_downstairs
+        data:
+          hvac_mode: 'off'
+    mode: single
+
+  # ---------------------------------------------------------------------------
+  # PRE-SESSION (DYNAMIC): disable Tado hot water up to 1 hour before EV slot
+  # If a slot appears within that hour, this triggers immediately on sensor change.
+  # Uses half-hour boundary floor for slot start to match cheap window logic.
+  # ---------------------------------------------------------------------------
+  - id: cheap_heat_tado_water_pre_disable_ev_slot
+    alias: "Cheap Heat - Pre-Disable Tado Hot Water Before EV Slot"
+    description: >
+      Save Tado hot water mode and switch it off when within 1 hour of the next
+      EV charging slot start (rounded down to previous 00/30 boundary).
+      If a slot is added inside that hour, react immediately.
+    trigger:
+      - platform: time_pattern
+        minutes: "/5"
+      - platform: state
+        entity_id:
+          - sensor.ev_next_charge_start
+          - sensor.ev_next_charge_start_2
+    condition:
+      - condition: state
+        entity_id: input_boolean.enable_dynamic_cheap_charging
+        state: 'on'
+      - condition: state
+        entity_id: input_boolean.cheap_heat_tado_water_pre_saved
+        state: 'off'
+      - condition: state
+        entity_id: binary_sensor.cheap_electricity_window_active
+        state: 'off'
+      - condition: template
+        value_template: >
+          {% set now_ts = as_timestamp(now()) | float(0) %}
+          {% set s1 = states('sensor.ev_next_charge_start') %}
+          {% set s2 = states('sensor.ev_next_charge_start_2') %}
+          {% set s1_ts = as_timestamp(s1) if s1 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set s2_ts = as_timestamp(s2) if s2 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set s1_floor = ((s1_ts // 1800) * 1800) if s1_ts > 0 else 0 %}
+          {% set s2_floor = ((s2_ts // 1800) * 1800) if s2_ts > 0 else 0 %}
+          {% set pre1 = s1_floor > 0 and now_ts >= (s1_floor - 3600) and now_ts < s1_floor %}
+          {% set pre2 = s2_floor > 0 and now_ts >= (s2_floor - 3600) and now_ts < s2_floor %}
+          {{ pre1 or pre2 }}
+    action:
+      - service: input_select.select_option
+        target:
+          entity_id: input_select.cheap_heat_prev_tado_hot_water_mode
+        data:
+          option: >
+            {{ states('water_heater.hot_water')
+               if states('water_heater.hot_water') in ['off','auto','heat']
+               else 'auto' }}
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.cheap_heat_tado_water_pre_saved
+      - service: water_heater.set_operation_mode
+        target:
+          entity_id: water_heater.hot_water
+        data:
+          operation_mode: 'off'
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.cheap_heat_hot_water_forced_off_until
+        data:
+          datetime: >
+            {{ (now() + timedelta(hours=(states('input_number.cheap_heat_hot_water_force_off_hours') | float(6)))).strftime('%Y-%m-%d %H:%M:%S') }}
+    mode: single
+
+
+  # ---------------------------------------------------------------------------
+  # ON WINDOW START: immersion on, Tuya UFH on, Tado radiators + hot water off
+  # ---------------------------------------------------------------------------
+  - id: cheap_electric_heat_enable
+    alias: "Cheap Heat - Enable Electric Sources"
+    description: >
+      On cheap electricity window opening (confirmed for 5 minutes):
+      - If Tado hot water was not already pre-saved at 23:00, snapshot and disable it now.
+      - Snapshot then disable Tado gas radiators (kitchen, ensuite, kids bathroom).
+      - Arm every Tuya UFH thermostat in heat_cool so each runs the programme
+        saved on the device. No target temperature is pushed from Home Assistant.
+      - Turn on immersion.
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.cheap_electricity_window_active
+        to: 'on'
+        for: "0:05:00"
+      - platform: state
+        entity_id: input_boolean.cheap_heat_allow_space_heating_swap
+        to: 'on'
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: state
+        entity_id: binary_sensor.cheap_electricity_window_active
+        state: 'on'
+    action:
+      # snapshot immersion state
+      - choose:
+          - conditions: "{{ is_state('switch.immersion_heater', 'on') }}"
+            sequence:
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.cheap_heat_prev_immersion_on
+        default:
+          - service: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.cheap_heat_prev_immersion_on
+
+      # snapshot + disable Tado hot water ONLY if the 23:00 pre-save did not already run
+      - choose:
+          - conditions: "{{ is_state('input_boolean.cheap_heat_tado_water_pre_saved', 'off') }}"
+            sequence:
+              - service: input_select.select_option
+                target:
+                  entity_id: input_select.cheap_heat_prev_tado_hot_water_mode
+                data:
+                  option: >
+                    {{ states('water_heater.hot_water')
+                       if states('water_heater.hot_water') in ['off','auto','heat']
+                       else 'auto' }}
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.cheap_heat_tado_water_pre_saved
+              - service: water_heater.set_operation_mode
+                target:
+                  entity_id: water_heater.hot_water
+                data:
+                  operation_mode: 'off'
+              - service: input_datetime.set_datetime
+                target:
+                  entity_id: input_datetime.cheap_heat_hot_water_forced_off_until
+                data:
+                  datetime: >
+                    {{ (now() + timedelta(hours=(states('input_number.cheap_heat_hot_water_force_off_hours') | float(6)))).strftime('%Y-%m-%d %H:%M:%S') }}
+      # if pre-save already ran, hot water is already off — nothing to do
+
+      - choose:
+          - conditions: >
+              {% set outdoor = states('sensor.outdoor_temperature') | float(99) %}
+              {% set cutoff = states('input_number.cheap_heat_outdoor_temp_cutoff') | float(16) %}
+              {% set rate = states('sensor.eon_next_current_rate_2') | float(999) %}
+              {% set threshold = states('input_number.eon_cheap_rate_threshold') | float(7) %}
+              {% set k_heat_raw = states('sensor.kitchen_heating') %}
+              {% set m_heat_raw = states('sensor.master_bathroom_heating') %}
+              {% set b_heat_raw = states('sensor.kids_bathroom_heating') %}
+              {% set k_heat = k_heat_raw | float(0) %}
+              {% set m_heat = m_heat_raw | float(0) %}
+              {% set b_heat = b_heat_raw | float(0) %}
+              {% set demand_known = (k_heat_raw not in ['unknown','unavailable','none','None','']) and (m_heat_raw not in ['unknown','unavailable','none','None','']) and (b_heat_raw not in ['unknown','unavailable','none','None','']) %}
+              {% set demand_active = (k_heat > 0) or (m_heat > 0) or (b_heat > 0) %}
+              {% set mode_fallback_active = states('climate.kitchen') != 'off' or states('climate.master_bathroom') != 'off' or states('climate.kids_bathroom') != 'off' %}
+              {{ is_state('input_boolean.cheap_heat_allow_space_heating_swap', 'on')
+                 and is_state('input_boolean.cheap_heat_space_heating_active', 'off')
+                 and rate <= threshold
+                 and outdoor <= cutoff
+                 and (demand_active or (not demand_known and mode_fallback_active)) }}
+            sequence:
+              # snapshot Tado kitchen mode and target temperature
+              - service: input_select.select_option
+                target:
+                  entity_id: input_select.cheap_heat_prev_tado_kitchen_mode
+                data:
+                  option: "{{ states('climate.kitchen') if states('climate.kitchen') in ['off','auto','heat'] else 'auto' }}"
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.cheap_heat_saved_kitchen_target
+                data:
+                  value: "{{ state_attr('climate.kitchen', 'temperature') | float(20) }}"
+
+              # snapshot Tado ensuite mode and target temperature
+              - service: input_select.select_option
+                target:
+                  entity_id: input_select.cheap_heat_prev_tado_master_bathroom_mode
+                data:
+                  option: "{{ states('climate.master_bathroom') if states('climate.master_bathroom') in ['off','auto','heat'] else 'auto' }}"
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.cheap_heat_saved_master_bathroom_target
+                data:
+                  value: "{{ state_attr('climate.master_bathroom', 'temperature') | float(20) }}"
+
+              # snapshot Tado kids bathroom mode and target temperature
+              - service: input_select.select_option
+                target:
+                  entity_id: input_select.cheap_heat_prev_tado_kids_bathroom_mode
+                data:
+                  option: "{{ states('climate.kids_bathroom') if states('climate.kids_bathroom') in ['off','auto','heat'] else 'auto' }}"
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.cheap_heat_saved_kids_bathroom_target
+                data:
+                  value: "{{ state_attr('climate.kids_bathroom', 'temperature') | float(20) }}"
+
+              # disable Tado gas radiators in paired rooms
+              - service: climate.set_hvac_mode
+                target:
+                  entity_id:
+                    - climate.kitchen
+                    - climate.master_bathroom
+                    - climate.kids_bathroom
+                data:
+                  hvac_mode: 'off'
+
+              # Arm every Tuya UFH thermostat. heat_cool is the only "armed" mode
+              # these devices expose; once armed they heat to the programme saved
+              # on the device itself. We intentionally do NOT send a target
+              # temperature - that would override the user's on-device schedule.
+              - service: climate.set_hvac_mode
+                target:
+                  entity_id:
+                    - climate.kitchen_front
+                    - climate.smart_thermostat
+                    - climate.master_bathroom_2
+                    - climate.kids_bathroom_2
+                    - climate.toilet_downstairs
+                data:
+                  hvac_mode: 'heat_cool'
+
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.cheap_heat_space_heating_active
+        # NOTE: no default branch on purpose. If the UFH branch does not match,
+        # we must NOT clear cheap_heat_space_heating_active here — a stale/false
+        # negative reading would orphan Tado in the OFF state with no restore.
+        # The flag is only ever cleared by the restore automations, which also
+        # put Tado back.
+
+      # enable immersion
+      - service: switch.turn_on
+        target:
+          entity_id: switch.immersion_heater
+
+    mode: single
+
+  # ---------------------------------------------------------------------------
+  # SAFETY: after 06:35 local, if cheap window is still ON unexpectedly,
+  # force restore when tariff is no longer cheap and EV slot has ended.
+  # This prevents rooms staying OFF late into the morning.
+  # ---------------------------------------------------------------------------
+  - id: cheap_electric_heat_morning_safety_restore
+    alias: "Cheap Heat - Morning Safety Restore"
+    description: >
+      Between 06:35 and 08:00 local, if cheap window remains on but EON rate is
+      above threshold and EV is outside rounded half-hour slot, force restore.
+    trigger:
+      - platform: time_pattern
+        minutes: "/5"
+    condition:
+      - condition: time
+        after: "06:35:00"
+        before: "08:00:00"
+      - condition: state
+        entity_id: binary_sensor.cheap_electricity_window_active
+        state: 'on'
+      - condition: state
+        entity_id: input_boolean.eon_next_boost_session
+        state: 'off'
+      - condition: template
+        value_template: >
+          {% set rate = states('sensor.eon_next_current_rate_2') | float(999) %}
+          {% set threshold = states('input_number.eon_cheap_rate_threshold') | float(7) %}
+          {{ rate > threshold }}
+      - condition: template
+        value_template: >
+          {% set now_ts = as_timestamp(now()) | float(0) %}
+          {% set s1 = states('sensor.ev_next_charge_start') %}
+          {% set e1 = states('sensor.ev_next_charge_end') %}
+          {% set s2 = states('sensor.ev_next_charge_start_2') %}
+          {% set e2 = states('sensor.ev_next_charge_end_2') %}
+          {% set s1_ts = as_timestamp(s1) if s1 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set e1_ts = as_timestamp(e1) if e1 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set s2_ts = as_timestamp(s2) if s2 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set e2_ts = as_timestamp(e2) if e2 not in ['unknown','unavailable','none','None',''] else 0 %}
+          {% set s1_floor = ((s1_ts // 1800) * 1800) if s1_ts > 0 else 0 %}
+          {% set e1_ceil = ((((e1_ts + 1799) // 1800) * 1800)) if e1_ts > 0 else 0 %}
+          {% set s2_floor = ((s2_ts // 1800) * 1800) if s2_ts > 0 else 0 %}
+          {% set e2_ceil = ((((e2_ts + 1799) // 1800) * 1800)) if e2_ts > 0 else 0 %}
+          {% set in_slot_1 = s1_floor > 0 and e1_ceil > 0 and now_ts >= s1_floor and now_ts < e1_ceil %}
+          {% set in_slot_2 = s2_floor > 0 and e2_ceil > 0 and now_ts >= s2_floor and now_ts < e2_ceil %}
+          {{ not (in_slot_1 or in_slot_2) }}
+    action:
+      - service: automation.trigger
+        target:
+          entity_id: automation.cheap_heat_restore_previous_sources
+
+
+  # ---------------------------------------------------------------------------
+  # SAFETY: fail-safe hot water auto-restore (window end OR force-off timeout)
+  # Prevents hot water getting stuck OFF if pre-save flags/mode flow drift.
+  # ---------------------------------------------------------------------------
+  - id: cheap_heat_hot_water_safety_auto
+    alias: "Cheap Heat - Hot Water Safety Auto Outside Window"
+    description: >
+      Restore Tado hot water to AUTO only when the cheap window is no longer
+      active. Hot water stays OFF for the entire cheap window so the electric
+      immersion heater does the work instead of the gas boiler. The force-off
+      timeout is NOT used to restore mid-window (that would turn gas back on
+      while electricity is still cheap). Also clears the pre-save flag to
+      recover cleanly from stuck state.
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.cheap_electricity_window_active
+        to: 'off'
+        for: "0:02:00"
+      - platform: time_pattern
+        minutes: "/5"
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: state
+        entity_id: water_heater.hot_water
+        state: 'off'
+      - condition: state
+        entity_id: binary_sensor.cheap_electricity_window_active
+        state: 'off'
+    action:
+      - service: water_heater.set_operation_mode
+        target:
+          entity_id: water_heater.hot_water
+        data:
+          operation_mode: 'auto'
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.cheap_heat_tado_water_pre_saved
+    mode: single
+
+
+  # ---------------------------------------------------------------------------
+  # ON WINDOW END: immersion off, Tuya UFH off, Tado restored
+  # ---------------------------------------------------------------------------
+  - id: cheap_electric_heat_restore
+    alias: "Cheap Heat - Restore Previous Sources"
+    description: >
+      When cheap electricity window ends:
+      - Turn off immersion.
+      - Turn off all Tuya UFH.
+      - Restore Tado hot water to its saved operation mode (resumes schedule if auto).
+      - Restore Tado gas radiators to saved mode (schedule resumes if auto; manual
+        setpoint only re-applied when previous mode was heat).
+      - Clear the hot water pre-save flag.
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.cheap_electricity_window_active
+        to: 'off'
+    action:
+      # always turn immersion off at window end to avoid carry-over from stale helper state
+      - service: switch.turn_off
+        target:
+          entity_id: switch.immersion_heater
+
+      # clear previous-state helper to prevent unintended re-enable next cycle
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.cheap_heat_prev_immersion_on
+
+      # restore Tado hot water — if mode was auto it resumes its schedule immediately
+      - service: water_heater.set_operation_mode
+        target:
+          entity_id: water_heater.hot_water
+        data:
+          operation_mode: >
+            {% set saved = states('input_select.cheap_heat_prev_tado_hot_water_mode') %}
+            {{ saved if saved in ['auto','heat'] else 'auto' }}
+
+      # clear the pre-save flag so tonight's 23:00 automation saves the real live mode
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.cheap_heat_tado_water_pre_saved
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.cheap_heat_hot_water_forced_off_until
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+      - choose:
+          - conditions: "{{ is_state('input_boolean.cheap_heat_space_heating_active', 'on') }}"
+            sequence:
+              # turn off all Tuya UFH
+              - service: climate.set_hvac_mode
+                target:
+                  entity_id:
+                    - climate.kitchen_front
+                    - climate.smart_thermostat
+                    - climate.master_bathroom_2
+                    - climate.kids_bathroom_2
+                    - climate.toilet_downstairs
+                data:
+                  hvac_mode: 'off'
+
+              # restore Tado kitchen
+              - service: climate.set_hvac_mode
+                target:
+                  entity_id: climate.kitchen
+                data:
+                  hvac_mode: >
+                    {% set saved = states('input_select.cheap_heat_prev_tado_kitchen_mode') %}
+                    {{ saved if saved in ['auto','heat'] else 'auto' }}
+              - choose:
+                  - conditions: "{{ states('input_select.cheap_heat_prev_tado_kitchen_mode') == 'heat' }}"
+                    sequence:
+                      - service: climate.set_temperature
+                        target:
+                          entity_id: climate.kitchen
+                        data:
+                          temperature: "{{ states('input_number.cheap_heat_saved_kitchen_target') | float(20) }}"
+
+              # restore Tado ensuite
+              - service: climate.set_hvac_mode
+                target:
+                  entity_id: climate.master_bathroom
+                data:
+                  hvac_mode: >
+                    {% set saved = states('input_select.cheap_heat_prev_tado_master_bathroom_mode') %}
+                    {{ saved if saved in ['auto','heat'] else 'auto' }}
+              - choose:
+                  - conditions: "{{ states('input_select.cheap_heat_prev_tado_master_bathroom_mode') == 'heat' }}"
+                    sequence:
+                      - service: climate.set_temperature
+                        target:
+                          entity_id: climate.master_bathroom
+                        data:
+                          temperature: "{{ states('input_number.cheap_heat_saved_master_bathroom_target') | float(20) }}"
+
+              # restore Tado kids bathroom
+              - service: climate.set_hvac_mode
+                target:
+                  entity_id: climate.kids_bathroom
+                data:
+                  hvac_mode: >
+                    {% set saved = states('input_select.cheap_heat_prev_tado_kids_bathroom_mode') %}
+                    {{ saved if saved in ['auto','heat'] else 'auto' }}
+              - choose:
+                  - conditions: "{{ states('input_select.cheap_heat_prev_tado_kids_bathroom_mode') == 'heat' }}"
+                    sequence:
+                      - service: climate.set_temperature
+                        target:
+                          entity_id: climate.kids_bathroom
+                        data:
+                          temperature: "{{ states('input_number.cheap_heat_saved_kids_bathroom_target') | float(20) }}"
+
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.cheap_heat_space_heating_active
+
+      # reset override detection state at window end
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.cheap_heat_override_retry_count
+        data:
+          value: 0
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.cheap_heat_override_detected
+      - service: persistent_notification.dismiss
+        data:
+          notification_id: cheap_heat_override_detected
+
+    mode: single
+
+  # ---------------------------------------------------------------------------
+  # EON SCHEDULE CACHE: persist valid schedule data to bridge API errors
+  # When EON's API returns unknown/error after a schedule update, sensors can
+  # stay invalid for up to ~1 hour. This automation saves the last known-good
+  # state so the cheap window keeps running correctly during that period.
+  # ---------------------------------------------------------------------------
+  - id: eon_schedule_cache_update
+    alias: "EON Schedule - Cache Valid State"
+    description: >
+      Whenever the EON smart charging schedule sensor returns a valid (non-error)
+      state, snapshot the schedule active flag and all four time-slot sensors
+      into helper entities. The cheap electricity window template uses these
+      cached values for up to 1 hour if the sensors return unknown/error.
+    trigger:
+      - platform: state
+        entity_id: sensor.ev_smart_charging_schedule
+    condition:
+      - condition: state
+        entity_id: sensor.ev_smart_charging_schedule
+        state: 'Active'
+    action:
+      - variables:
+          is_active: >
+            {{ is_state('sensor.ev_smart_charging_schedule', 'Active') }}
+          s1_val: "{{ states('sensor.ev_next_charge_start') }}"
+          e1_val: "{{ states('sensor.ev_next_charge_end') }}"
+          s2_val: "{{ states('sensor.ev_next_charge_start_2') }}"
+          e2_val: "{{ states('sensor.ev_next_charge_end_2') }}"
+      - choose:
+          - conditions: "{{ is_active }}"
+            sequence:
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.eon_sched_cache_active
+        default:
+          - service: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.eon_sched_cache_active
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.eon_sched_cache_s1
+        data:
+          value: >
+            {{ s1_val if s1_val not in ['unknown','unavailable','none','None',''] else '' }}
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.eon_sched_cache_e1
+        data:
+          value: >
+            {{ e1_val if e1_val not in ['unknown','unavailable','none','None',''] else '' }}
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.eon_sched_cache_s2
+        data:
+          value: >
+            {{ s2_val if s2_val not in ['unknown','unavailable','none','None',''] else '' }}
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.eon_sched_cache_e2
+        data:
+          value: >
+            {{ e2_val if e2_val not in ['unknown','unavailable','none','None',''] else '' }}
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.eon_sched_cache_updated
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+    mode: single
+
+  # ---------------------------------------------------------------------------
+  # OVERRIDE DETECTION + ENSURE: detect manual overrides during cheap window
+  # and re-apply expected states. Retries up to max, then flags + notifies.
+  # ---------------------------------------------------------------------------
+  - id: cheap_heat_override_detect_and_ensure
+    alias: "Cheap Heat - Override Detect And Ensure"
+    initial_state: true
+    description: >
+      While the cheap electricity window is active, verify the expected outputs
+      are still in their cheap-window states. If a manual override has turned
+      something off (e.g. immersion), re-apply the expected state. Tracks retries;
+      after max retries, sets the override_detected flag and posts a persistent
+      notification so the user can investigate.
+    trigger:
+      - platform: time_pattern
+        minutes: "/2"
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: state
+        entity_id: binary_sensor.cheap_electricity_window_active
+        state: 'on'
+    action:
+      - variables:
+          immersion_expected_on: true
+          immersion_state: "{{ states('switch.immersion_heater') }}"
+          immersion_known: "{{ immersion_state not in ['unknown', 'unavailable'] }}"
+          immersion_actual: "{{ immersion_state == 'on' }}"
+          # An entity we cannot reach is NOT evidence of a manual override - only a
+          # device we can read and that is demonstrably off counts. Otherwise an
+          # offline plug spins the retry counter to max and raises a false alarm.
+          override_detected: "{{ immersion_known and not immersion_actual }}"
+          unverifiable: "{{ not immersion_known }}"
+          retry_count: "{{ states('input_number.cheap_heat_override_retry_count') | int(0) }}"
+          max_retries: "{{ states('input_number.cheap_heat_override_max_retries') | int(3) }}"
+
+      # If an override is detected, re-apply expected states and count the retry
+      - choose:
+          - conditions: "{{ override_detected }}"
+            sequence:
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.cheap_heat_override_retry_count
+                data:
+                  value: "{{ retry_count + 1 }}"
+
+              # re-apply immersion on
+              - choose:
+                  - conditions: "{{ not immersion_actual }}"
+                    sequence:
+                      - service: switch.turn_on
+                        target:
+                          entity_id: switch.immersion_heater
+
+              # if we've hit max retries, flag it and notify persistently
+              - choose:
+                  - conditions: "{{ (retry_count + 1) >= max_retries }}"
+                    sequence:
+                      - service: input_boolean.turn_on
+                        target:
+                          entity_id: input_boolean.cheap_heat_override_detected
+                      - service: input_text.set_value
+                        target:
+                          entity_id: input_text.cheap_heat_override_message
+                        data:
+                          value: >
+                            Manual override detected during cheap window. The
+                            immersion heater was off when it should have been on.
+                            Re-applied {{ (retry_count + 1) }} times without
+                            sticking. Check switch.immersion_heater.
+                      - service: persistent_notification.create
+                        data:
+                          title: "Cheap Heat - Manual Override Detected"
+                          message: >
+                            A manual override was detected during the cheap electricity
+                            window. The immersion heater was turned off but should be
+                            on. Re-applied {{ (retry_count + 1) }} times without
+                            sticking. Please check the immersion switch
+                            (switch.immersion_heater).
+                          notification_id: cheap_heat_override_detected
+        default:
+          # No override: reset retry count and clear the flag/notification
+          - service: input_number.set_value
+            target:
+              entity_id: input_number.cheap_heat_override_retry_count
+            data:
+              value: 0
+          - service: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.cheap_heat_override_detected
+          - service: persistent_notification.dismiss
+            data:
+              notification_id: cheap_heat_override_detected
+    mode: single
+
+  # ---------------------------------------------------------------------------
+  # ON SWAP SWITCH OFF (mid-window): reverse ONLY the Tado/UFH swap immediately.
+  # Immersion and hot water are NOT touched — they keep running
+  # on cheap power until the window ends normally.
+  # Flip the switch back ON during the same window to re-arm the swap; the
+  # cheap_electric_heat_enable automation is triggered by that too.
+  # ---------------------------------------------------------------------------
+  - id: cheap_electric_heat_swap_disabled_restore
+    alias: "Cheap Heat - Swap Disabled Restore"
+    description: >
+      When input_boolean.cheap_heat_allow_space_heating_swap is turned OFF while
+      a Tado-off / UFH-on swap is running, immediately switch all UFH zones off
+      and restore the Tado zones to their saved modes/targets. Hot water and
+      immersion behavior is unchanged.
+    trigger:
+      - platform: state
+        entity_id: input_boolean.cheap_heat_allow_space_heating_swap
+        to: 'off'
+    condition:
+      - condition: state
+        entity_id: input_boolean.cheap_heat_space_heating_active
+        state: 'on'
+    action:
+      # turn off all Tuya UFH
+      - service: climate.set_hvac_mode
+        target:
+          entity_id:
+            - climate.kitchen_front
+            - climate.smart_thermostat
+            - climate.master_bathroom_2
+            - climate.kids_bathroom_2
+            - climate.toilet_downstairs
+        data:
+          hvac_mode: 'off'
+
+      # restore Tado kitchen
+      - service: climate.set_hvac_mode
+        target:
+          entity_id: climate.kitchen
+        data:
+          hvac_mode: >
+            {% set saved = states('input_select.cheap_heat_prev_tado_kitchen_mode') %}
+            {{ saved if saved in ['auto','heat'] else 'auto' }}
+      - choose:
+          - conditions: "{{ states('input_select.cheap_heat_prev_tado_kitchen_mode') == 'heat' }}"
+            sequence:
+              - service: climate.set_temperature
+                target:
+                  entity_id: climate.kitchen
+                data:
+                  temperature: "{{ states('input_number.cheap_heat_saved_kitchen_target') | float(20) }}"
+
+      # restore Tado ensuite
+      - service: climate.set_hvac_mode
+        target:
+          entity_id: climate.master_bathroom
+        data:
+          hvac_mode: >
+            {% set saved = states('input_select.cheap_heat_prev_tado_master_bathroom_mode') %}
+            {{ saved if saved in ['auto','heat'] else 'auto' }}
+      - choose:
+          - conditions: "{{ states('input_select.cheap_heat_prev_tado_master_bathroom_mode') == 'heat' }}"
+            sequence:
+              - service: climate.set_temperature
+                target:
+                  entity_id: climate.master_bathroom
+                data:
+                  temperature: "{{ states('input_number.cheap_heat_saved_master_bathroom_target') | float(20) }}"
+
+      # restore Tado kids bathroom
+      - service: climate.set_hvac_mode
+        target:
+          entity_id: climate.kids_bathroom
+        data:
+          hvac_mode: >
+            {% set saved = states('input_select.cheap_heat_prev_tado_kids_bathroom_mode') %}
+            {{ saved if saved in ['auto','heat'] else 'auto' }}
+      - choose:
+          - conditions: "{{ states('input_select.cheap_heat_prev_tado_kids_bathroom_mode') == 'heat' }}"
+            sequence:
+              - service: climate.set_temperature
+                target:
+                  entity_id: climate.kids_bathroom
+                data:
+                  temperature: "{{ states('input_number.cheap_heat_saved_kids_bathroom_target') | float(20) }}"
+
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.cheap_heat_space_heating_active
+
+    mode: single
