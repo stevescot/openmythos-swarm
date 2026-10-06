@@ -41,7 +41,26 @@
 #   Pre-session disable fires at 23:00 to stop Tado heating water on gas for the
 #   hour before the cheap window opens at 00:00.
 #
-# Kitchen back: sensor unreliable; kitchen front current_temperature drives it.
+# Kitchen back (climate.smart_thermostat) has NO floor sensor - only an air
+# sensor - so it cannot regulate the mat it is buried in. It is therefore slaved
+# to kitchen front (climate.kitchen_front), which does have a floor sensor, and
+# the two behave as ONE zone. See automation
+# "cheap_heat_kitchen_back_mirror_front" at the end of this file.
+#
+# Tuya scaling gotcha (verified from raw cloud datapoints, 2026-10-06):
+#   true degrees C = raw * 0.5 for every temperature DP on both thermostats.
+#   HA exposes them mis-scaled and INCONSISTENTLY:
+#     front setpoint 20.5 C -> attribute `temperature` 4.1   (raw/10)
+#     front floor    18.5 C -> attribute `current_temperature` 37.0 (raw, unscaled)
+#     back  setpoint 35.0 C -> attribute `temperature` 7.0   (raw/10)
+#     back  air      31.5 C -> attribute `current_temperature` 6.3 (raw/10)
+#   A naive `current_temperature < temperature` test therefore reads
+#   37.0 < 4.1 = false and is INVERTED. sensor.kitchen_front_setpoint_temp and
+#   sensor.kitchen_front_floor_temp undo the scaling so the logic is readable.
+#   If these two sensors ever stop reading ~20 C / ~18 C, the scaling changed.
+#
+# The back is left at its 35 C maximum by hand and is only ever switched
+# heat_cool/off - never given a target temperature - so it acts as a relay.
 # ============================================================================
 
 input_boolean:
@@ -649,6 +668,37 @@ template:
           temp_coefficient: "{{ states('input_number.cheap_heat_immersion_tempco') }}"
           current_a: "{{ states('sensor.immersion_heater_current') }}"
           limits: "Element 20–70°C. Water estimate only reliable during active heating."
+
+      # ---------------------------------------------------------------------
+      # Kitchen front UFH - de-scaled readings.
+      # HA exposes these Tuya datapoints with the wrong scale and does it
+      # inconsistently (setpoint raw/10, floor raw unscaled), so a direct
+      # comparison is inverted. These two sensors restore true degrees C.
+      # ---------------------------------------------------------------------
+      - name: "Kitchen Front Setpoint Temp"
+        unique_id: kitchen_front_setpoint_temp
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        icon: mdi:thermostat-cog
+        availability: >
+          {{ states('climate.kitchen_front') not in ['unknown','unavailable']
+             and state_attr('climate.kitchen_front', 'temperature') is not none }}
+        state: >
+          {{ (state_attr('climate.kitchen_front', 'temperature') | float(0) * 5) | round(1) }}
+
+      - name: "Kitchen Front Floor Temp"
+        unique_id: kitchen_front_floor_temp
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        icon: mdi:heat-wave
+        availability: >
+          {{ states('climate.kitchen_front') not in ['unknown','unavailable']
+             and state_attr('climate.kitchen_front', 'current_temperature') is not none }}
+        state: >
+          {{ (state_attr('climate.kitchen_front', 'current_temperature') | float(0) / 2) | round(1) }}
+
 automation:
   # ---------------------------------------------------------------------------
   # PRE-SESSION: disable Tado hot water one hour before cheap window opens
@@ -1028,11 +1078,15 @@ automation:
               # these devices expose; once armed they heat to the programme saved
               # on the device itself. We intentionally do NOT send a target
               # temperature - that would override the user's on-device schedule.
+              #
+              # climate.smart_thermostat (kitchen back) is deliberately NOT armed
+              # here. It has no floor sensor, so arming it directly makes it run
+              # open-loop. It is switched by cheap_heat_kitchen_back_mirror_front,
+              # which follows kitchen front's floor sensor instead.
               - service: climate.set_hvac_mode
                 target:
                   entity_id:
                     - climate.kitchen_front
-                    - climate.smart_thermostat
                     - climate.master_bathroom_2
                     - climate.kids_bathroom_2
                     - climate.toilet_downstairs
@@ -1535,3 +1589,115 @@ automation:
           entity_id: input_boolean.cheap_heat_space_heating_active
 
     mode: single
+
+  # ===========================================================================
+  # KITCHEN BACK MIRRORS KITCHEN FRONT (single zone)
+  # ---------------------------------------------------------------------------
+  # The kitchen back mat's own thermostat is broken: the device reports a floor
+  # temperature of 0 and has no floor sensor at all, only an air sensor. Left on
+  # its own it runs open-loop at whatever setpoint it is given.
+  #
+  # Kitchen front DOES have a working floor sensor, so it decides when the whole
+  # kitchen heats. The back is a dumb follower: armed while the front's floor is
+  # below the front's setpoint, switched off once the front is satisfied or off.
+  #
+  # Deliberately tariff-independent. The cheap-heat window-end automation still
+  # forces both mats off, so the back can never run into an expensive period;
+  # gating it twice would only add a failure mode.
+  #
+  # We NEVER send set_temperature to the back. It stays at its hand-set maximum
+  # and is only ever switched heat_cool/off.
+  # ===========================================================================
+  - id: cheap_heat_kitchen_back_mirror_front
+    alias: "Cheap Heat - Kitchen Back Follows Kitchen Front"
+    initial_state: true
+    description: >
+      Slaves climate.smart_thermostat (kitchen back, no floor sensor) to the
+      kitchen front floor sensor. Armed while front is armed and its floor is
+      below setpoint minus hysteresis; off as soon as the front is off/satisfied
+      or its readings go stale. Never changes any target temperature.
+    triggers:
+      # A classic `template` trigger fires on the false -> true edge only, so we
+      # use two mutually exclusive templates with a dead band between them.
+      #
+      # --- back should be ON: front armed AND floor genuinely below target ---
+      - trigger: template
+        id: arm
+        value_template: >
+          {% set setp = states('sensor.kitchen_front_setpoint_temp') | float(-1) %}
+          {% set floor = states('sensor.kitchen_front_floor_temp') | float(-1) %}
+          {% set hyst = states('input_number.cheap_heat_kitchen_back_hysteresis') | float(0.3) %}
+          {{ is_state('climate.kitchen_front', 'heat_cool')
+             and setp > 0 and floor > 0
+             and floor < (setp - hyst) }}
+        for:
+          minutes: 2   # held so a single noisy floor reading cannot cycle the mat
+      # --- back should be OFF: front off/not armed, stale data, or satisfied ---
+      # No `for:` - overshoot must stop immediately, not 2 minutes later.
+      - trigger: template
+        id: stop
+        value_template: >
+          {% set setp = states('sensor.kitchen_front_setpoint_temp') | float(-1) %}
+          {% set floor = states('sensor.kitchen_front_floor_temp') | float(-1) %}
+          {% set hyst = states('input_number.cheap_heat_kitchen_back_hysteresis') | float(0.3) %}
+          {{ not is_state('climate.kitchen_front', 'heat_cool')
+             or setp <= 0
+             or floor <= 0
+             or floor > (setp + hyst) }}
+      #
+      # --- resync: enforce the wanted state even if something else moved it ---
+      - trigger: time_pattern
+        id: resync
+        minutes: "/5"
+    action:
+      # The wanted state is recomputed here rather than trusted from the trigger,
+      # so the resync pass and any manual/external change to the back are both
+      # corrected. Inlined (not a variable) to avoid template whitespace quirks.
+      - if:
+          - condition: template
+            value_template: >
+              {% set setp = states('sensor.kitchen_front_setpoint_temp') | float(-1) %}
+              {% set floor = states('sensor.kitchen_front_floor_temp') | float(-1) %}
+              {% set hyst = states('input_number.cheap_heat_kitchen_back_hysteresis') | float(0.3) %}
+              {{ is_state('climate.kitchen_front', 'heat_cool')
+                 and setp > 0 and floor > 0
+                 and floor < (setp - hyst) }}
+        then:
+          - alias: "Run the back mat with the front"
+            if:
+              - condition: not
+                conditions:
+                  - condition: state
+                    entity_id: climate.smart_thermostat
+                    state: 'heat_cool'
+            then:
+              - service: climate.set_hvac_mode
+                target:
+                  entity_id: climate.smart_thermostat
+                data:
+                  hvac_mode: 'heat_cool'
+              - service: logbook.log
+                data:
+                  name: "Kitchen back UFH"
+                  message: "On - mirroring kitchen front (floor {{ states('sensor.kitchen_front_floor_temp') }} C below setpoint {{ states('sensor.kitchen_front_setpoint_temp') }} C)"
+        else:
+          - alias: "Stop the back mat"
+            if:
+              - condition: not
+                conditions:
+                  - condition: state
+                    entity_id: climate.smart_thermostat
+                    state: 'off'
+            then:
+              - service: climate.set_hvac_mode
+                target:
+                  entity_id: climate.smart_thermostat
+                data:
+                  hvac_mode: 'off'
+              - service: logbook.log
+                data:
+                  name: "Kitchen back UFH"
+                  message: "Off - kitchen front satisfied or not armed (floor {{ states('sensor.kitchen_front_floor_temp') }} C vs setpoint {{ states('sensor.kitchen_front_setpoint_temp') }} C)"
+    mode: queued
+    max: 4
+    max_exceeded: silent
