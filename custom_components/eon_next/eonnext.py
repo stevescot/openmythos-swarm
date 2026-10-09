@@ -36,9 +36,18 @@ METER_TYPE_ELECTRIC = "electricity"
 METER_TYPE_EV = "ev"
 METER_TYPE_UNKNOWN = "unknown"
 
-# Cooldown (seconds) after a rejected refresh so we don't hammer Auth0 with a
+# Cooldown (seconds) after a *rejected* refresh so we don't hammer Auth0 with a
 # spent token and keep the family revoked.
 AUTH_COOLDOWN_SECONDS = 300
+
+# Backoff (seconds) after a *transient* refresh failure (DNS timeout, connection
+# reset, 5xx). These are not the token's fault, so retry sooner than for a
+# rejection - but not immediately, to avoid a tight failure loop.
+AUTH_RETRY_SECONDS = 60
+
+# Assumed Auth0 refresh-token lifetime. Auth0 rotates on every use, so the real
+# expiry keeps sliding forward; this is only a sanity ceiling.
+REFRESH_LIFETIME_SECONDS = 30 * 86400
 
 # A rate at or below this (pence/kWh) is treated as "cheap". Overridable per call.
 DEFAULT_CHEAP_THRESHOLD_P = 12.0
@@ -75,6 +84,10 @@ class EonNext:
         self._refresh_lock = asyncio.Lock()
         # After a rejected refresh, stop hammering Auth0 until the cooldown ends.
         self._auth_blocked_until = 0
+        # Refresh tokens we were explicitly rejected for. Keeps us from
+        # re-presenting a spent token (which re-revokes the family) while still
+        # accepting a freshly bootstrapped one without a restart.
+        self._rejected_refresh_tokens = set()
 
     def _json_contains_key_chain(self, data, key_chain):
         for key in key_chain:
@@ -97,6 +110,14 @@ class EonNext:
             "refresh": {"token": None, "expires": None},
         }
 
+    def __invalidate_access_token(self):
+        # Drop the access token but KEEP the refresh token. Clearing the refresh
+        # token here used to lock the integration out permanently: nothing but a
+        # successful refresh (or a HA restart) ever repopulated it, so a single
+        # transient network error disabled every sensor until restart.
+        self.auth["token"] = {"token": None, "expires": None}
+        self.auth["issued"] = None
+
     def __decode_jwt(self, token):
         import base64
         part = token.split(".")[1]
@@ -112,7 +133,7 @@ class EonNext:
         exp = int(payload.get("exp", iat + 3600))
         # Auth0 refresh tokens rotate on every use; assume a generous lifetime and
         # persist the rotated token after each refresh.
-        refresh_exp = iat + 30 * 86400
+        refresh_exp = iat + REFRESH_LIFETIME_SECONDS
         self.auth = {
             "issued": iat,
             "token": {"token": id_token, "expires": exp},
@@ -153,9 +174,21 @@ class EonNext:
             return False
         return True
 
-    def __refresh_token_is_valid(self):
-        if self.auth["refresh"]["token"] is None:
+    async def __refresh_token_is_valid(self):
+        # Consult the persisted file first (it always holds the freshest rotated
+        # token) and only fall back to the in-memory value. Reading only memory
+        # meant that once __reset_authentation() cleared the token, no transient
+        # failure could ever be recovered from without a restart.
+        tok = await self.__load_refresh()
+        if not tok:
             return False
+        if tok in self._rejected_refresh_tokens:
+            # Already refused by Auth0; wait for a new token instead of
+            # re-presenting it and re-revoking the family.
+            return False
+        if not self.auth["refresh"]["expires"]:
+            # Never refreshed in this process yet - assume the file is usable.
+            return True
         if self.auth["refresh"]["expires"] <= self.__current_timestamp():
             return False
         return True
@@ -172,10 +205,8 @@ class EonNext:
         # token (which keeps the family revoked and spams the log).
         if self.__current_timestamp() < self._auth_blocked_until:
             return
-        if self.__refresh_token_is_valid():
-            if await self.__login_with_refresh_token():
-                return
-        self._auth_blocked_until = self.__current_timestamp() + AUTH_COOLDOWN_SECONDS
+        if await self.__refresh_token_is_valid():
+            await self.__login_with_refresh_token()
 
     async def _graphql_post(self, operation, query, variables=None, authenticated=True):
         variables = variables or {}
@@ -264,9 +295,12 @@ class EonNext:
                 async with session.post(AUTH0_TOKEN_URL, data=form, headers=headers) as response:
                     data = await response.json()
         except Exception as e:
+            # Transient (DNS, TCP, TLS, 5xx, timeout). The refresh token is still
+            # good, so do NOT clear it - just back off briefly and let the next
+            # poll retry. Shorter cooldown than a rejection.
             _LOGGER.error("E.ON Next Auth0 refresh failed: %s", e)
-            self.__reset_authentation()
-            self._auth_blocked_until = self.__current_timestamp() + AUTH_COOLDOWN_SECONDS
+            self.auth["token"] = {"token": None, "expires": None}
+            self._auth_blocked_until = self.__current_timestamp() + AUTH_RETRY_SECONDS
             return False
 
         if "id_token" in data and "refresh_token" in data:
@@ -278,10 +312,16 @@ class EonNext:
             return True
 
         _LOGGER.error(
-            "E.ON Next Auth0 refresh rejected: %s %s",
+            "E.ON Next Auth0 refresh rejected: %s %s - the stored refresh token is "
+            "spent or revoked; a browser PKCE re-login is required.",
             data.get("error"), data.get("error_description"),
         )
         self.__reset_authentation()
+        # Remember the token we were rejected for. __refresh_token_is_valid() will
+        # refuse to present it again, but will accept a different token the moment
+        # one is written to the bootstrap file (e.g. after a PKCE re-login), so no
+        # restart is needed to recover.
+        self._rejected_refresh_tokens.add(rt)
         # Engage cooldown while still holding the lock so tasks queued behind
         # us see it and don't present the spent token again.
         self._auth_blocked_until = self.__current_timestamp() + AUTH_COOLDOWN_SECONDS

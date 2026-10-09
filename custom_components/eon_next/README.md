@@ -136,12 +136,23 @@ automation:
 
 - **All tariff sensors `unavailable`** → the refresh token is revoked/expired.
   Re-run the browser PKCE bootstrap and replace
-  `<config>/eon_auth0_refresh.json`, then reload.
+  `<config>/eon_auth0_refresh.json`, then reload. Writing the new file is enough
+  on its own — the token is re-read from disk on every poll, so no restart is
+  needed.
+- **`Unable to authenticate` on every poll** → historically this meant a
+  permanent lockout: a transient failure (DNS timeout, connection reset) cleared
+  the in-memory refresh token and nothing ever re-read the file, so only a HA
+  restart recovered. That is fixed — transient failures now keep the refresh
+  token and retry after `AUTH_RETRY_SECONDS`. If you still see it, check for
+  `Auth0 refresh rejected` in the log, which means the token really is spent.
 - **`KT-CT-1143 not a valid credential`** → you presented the SPA access_token;
   use the `id_token`.
 - **`invalid_grant / Unknown or invalid refresh token`** → the token was already
   rotated (or reused). Bootstrap a fresh one. The lock + cooldown in this
-  integration prevent this from recurring under normal concurrent polling.
+  integration prevent this from recurring under normal concurrent polling, and a
+  rejected token is remembered locally so it is never re-presented.
+
+Regression test: `python tests/test_eonnext_lockout.py` (no network required).
 
 ## Security
 
